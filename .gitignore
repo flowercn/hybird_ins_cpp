@@ -1,0 +1,4 @@
+build/
+*.csv
+.DS_Store
+.vscode/
