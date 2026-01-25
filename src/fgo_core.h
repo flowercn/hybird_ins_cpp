@@ -1,6 +1,6 @@
 #pragma once
 #include <gtsam/navigation/CombinedImuFactor.h>
-#include <gtsam/nonlinear/ISAM2.h>
+#include <gtsam/nonlinear/ISAM2.h> // ✅ 使用最稳的 ISAM2
 #include <gtsam/nonlinear/Values.h>
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/slam/PriorFactor.h>
@@ -35,23 +35,21 @@ struct NavStateResult {
 
 class FGOEngine {
 public:
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW 
+
     FGOEngine(const FGOSettings& settings);
     
-    // [修改] 增加 bg_init, ba_init 参数
     void initialize(double t0, const Eigen::Vector3d& att, const Eigen::Vector3d& vn, const Eigen::Vector3d& pos,
                     const Eigen::Vector3d& bg_init, const Eigen::Vector3d& ba_init);
 
-    bool process_imu(const Eigen::Vector3d& gyro, const Eigen::Vector3d& acc, double dt, bool force_align, bool use_cai);
+    bool process_psins_delta(const Pose3& dPose_psins, const Eigen::Vector3d& vel_curr_psins, double t_curr);
     void add_cai_measurement(double t_end, const Eigen::Vector3d& w_avg);
     NavStateResult get_result();
 
 private:
     FGOSettings settings_;
-    std::unique_ptr<ISAM2> isam_;
-    std::unique_ptr<PreintegratedCombinedMeasurements> pim_;
+    std::unique_ptr<ISAM2> isam_; // ✅ 稳如老狗的引擎
     
-    boost::shared_ptr<PreintegratedCombinedMeasurements::Params> p_params_;
-
     Pose3 prev_pose_;
     Eigen::Vector3d prev_vel_; 
     imuBias::ConstantBias prev_bias_;

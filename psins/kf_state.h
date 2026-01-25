@@ -10,8 +10,6 @@ using namespace Eigen;
 class KFAlignVN {
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
-    // 复刻 alignvn.m: 12维状态
     // 0-2: phi(3), 3-5: dv(3), 6-8: eb(3), 9-11: db(3)
     static const int n = 12; 
     static const int m = 3;  // 观测: vn

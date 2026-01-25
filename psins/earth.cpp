@@ -37,7 +37,7 @@ void Earth::eupdate(const Vector3d& pos, const Vector3d& vn) {
     // 存储中间变量
     this->sl = sl; this->cl = cl; this->tl = tl; this->sl2 = sl2;
 }
-//
+
 // 在 Eth 类中添加构造函数
 Earth::Earth(const GLV& glv) {
     // 基础常数同步

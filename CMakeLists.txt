@@ -3,7 +3,7 @@ project(HybridINS)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_BUILD_TYPE Release)
+set(CMAKE_BUILD_TYPE Debug)
 
 # --- 1. 寻找依赖 ---
 find_package(Eigen3 REQUIRED)
@@ -47,10 +47,8 @@ add_executable(fgo_main
 target_link_libraries(fgo_main 
     Eigen3::Eigen 
     gtsam 
+    gtsam_unstable   # <--- 必须有这一行！
     ${Boost_LIBRARIES}
 )
 
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/test_gtsam_logic.cpp")
-    add_executable(test_gtsam src/test_gtsam_logic.cpp)
-    target_link_libraries(test_gtsam gtsam)
-endif()
+

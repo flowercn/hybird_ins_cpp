@@ -1,198 +1,133 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
-#include <cmath>
-#include <sstream>
 #include <iomanip>
-#include <memory>
-#include <algorithm> 
 #include <Eigen/Dense>
 
-#include "../psins/sins_engine.h"  
-#include "cai_sim.h"
-#include "fgo_core.h"
+#include "sins_engine.h" 
+#include "support.h"
 
 using namespace std;
 using namespace Eigen;
 
-std::vector<IMUData> load_and_process_data(const std::string& filename, double ts, double target_g);
-Vector3d LocalToGeo(const Vector3d& xyz_enu, const Vector3d& pos_ref_rad, const GLV& glv);
-
 int main() {
+    // 1. 基础配置
     GLV glv; 
     string fog_path = "../fog.csv"; 
     double ts = 1.0 / 400.0;
-
-    // [Step 0] 严格物理缩放：确保数据重力 = 算法重力
-    cout << "[DEBUG] Loading and scaling data..." << endl;
+    
+    // 加载数据 (support.h 内部已包含自动计算 scale_ratio 的逻辑)
     auto all_data = load_and_process_data(fog_path, ts, glv.g0);
     if (all_data.empty()) return -1;
 
-    // SINS 粗对准参数
+    // 2. 配置参数 (与 MATLAB 代码对齐)
     AlignConfig align_cfg;
-    align_cfg.att_ref << -0.03258, 0.20927, 0.62977; align_cfg.att_ref *= glv.deg;  
+    align_cfg.att_ref << 0.03404385, 0.3160598, 0.6178784; // 这里的数值根据你的MATLAB代码调整
+    align_cfg.att_ref *= glv.deg;  
+    
     align_cfg.pos_ref << 32.0286 * glv.deg, 118.8533 * glv.deg, 17.0; 
+    
     align_cfg.phi_init_err << 0.01, 0.01, 0.1; align_cfg.phi_init_err *= glv.deg; 
     align_cfg.wvn_err << 0.001, 0.001, 0.001;
-    align_cfg.eb_sigma = 0.2 * glv.dph; align_cfg.db_sigma = 100 * glv.ug;          
-    align_cfg.web_psd  = 0.021 * glv.dpsh; align_cfg.wdb_psd  = 10 * glv.ugpsHz;
-
-    SinsEngine sins(ts);
-    double align_duration = 300.0; // 对准 300秒
-    sins.Init(align_cfg, align_duration);
-
-    CAIGSimulator cai;
-    cai.Init(align_duration);
-
-    // FGO 配置
-    FGOSettings fgo_opts;
-    fgo_opts.fog_dt = ts;
-    fgo_opts.node_interval = 1.0; 
-    fgo_opts.gravity = glv.g0; // 物理模型一致
     
-    // 设置噪声参数
-    fgo_opts.gyro_noise = 0.1 * glv.deg;      
-    fgo_opts.gyro_bias_noise = 1.0e-5;         
-    fgo_opts.accel_bias_noise = 1.0e-8; // 锁死加计Bias
-    fgo_opts.cai_rot_noise = 2e-4 * glv.deg * sqrt(2.0); 
-    
-    FGOEngine fgo(fgo_opts);
-    bool fgo_started = false;
+    // 器件误差设置
+    align_cfg.eb_sigma = 0.2 * glv.dph;          
+    align_cfg.db_sigma = 100 * glv.ug;           
+    align_cfg.web_psd  = 0.021 * glv.dpsh;       
+    align_cfg.wdb_psd  = 10 * glv.ugpsHz;
 
-    // 日志
-    std::ofstream fgo_log("res_fgo_final.csv");
-    fgo_log << "time,lat,lon,h,vn,ve,vd,roll,pitch,yaw,bg_x,bg_y,bg_z,ba_x,ba_y,ba_z" << endl;
+    // ---------------------------------------------------------
+    // 步骤 A: 运行标准对准 (获取 Cnb 和 Bias)
+    // ---------------------------------------------------------
+    double t_align = 300.0;
+    SinsEngine align_engine(ts);
+    align_engine.Init(align_cfg, 30.0, 270.0); // Coarse 30s + Fine 270s = 300s
 
-    cout << "🚀 Starting Relay Simulation (SINS Align -> FGO Nav)..." << endl;
+    cout << "------------------------------------------------" << endl;
+    cout << "Step 1: Running Initial Alignment (300s)..." << endl;
     
     for (const auto& d : all_data) {
-        // SINS 始终在运行，用于提供对准结果和作为 CAIG 的“真值驱动”
-        sins.Step(d.wm, d.vm, d.t);
-
-        if (d.t >= align_duration) {
-            
-            if (!fgo_started) {
-                // [Step 1: 完美继承]
-                // 1. 姿态：用 SINS 算好的精对准姿态
-                Vector3d att_init = sins.GetAttDeg() * glv.deg; 
-                // 2. 速度/位置：按你要求置零 (本地导航系原点)
-                Vector3d vel_init = Vector3d::Zero(); 
-                Vector3d pos_init = Vector3d::Zero(); 
-                // 3. 零偏：用 SINS 估计出的零偏 (eb, db)
-                Vector3d bg_init = sins.GetBiasGyro();
-                Vector3d ba_init = sins.GetBiasAcc();
-
-                // 初始化 FGO
-                fgo.initialize(d.t, att_init, vel_init, pos_init, bg_init, ba_init);
-                fgo_started = true;
-            }
-
-            // 原子陀螺仿真
-            Vector3d cai_omega;
-            bool cai_has_data = cai.Update(d.t, sins.GetQnb(), cai_omega);
-
-            Eigen::Vector3d gyro_input = Eigen::Vector3d::Zero(); // 平台稳定
-            Eigen::Vector3d acc_input = d.vm / ts; 
-
-            // [Step 2: 严禁 ZUPT]
-            // force_align = false -> 纯积分 + 原子观测
-            bool new_node = fgo.process_imu(gyro_input, acc_input, ts, false, false);
-            
-            if (cai_has_data) {
-                fgo.add_cai_measurement(d.t, cai_omega);
-                // 进度打印
-                static double last_print = 0;
-                if (d.t - last_print > 10.0) {
-                    cout << "\r[Nav] t=" << fixed << setprecision(1) << d.t << "s" << flush;
-                    last_print = d.t;
-                }
-            }
-
-            if (new_node) {
-                NavStateResult res = fgo.get_result();
-                Vector3d ypr = res.pose.rotation().ypr(); 
-                Vector3d att_deg(ypr(1), ypr(2), ypr(0)); att_deg *= glv.rad;
-                
-                // 将 FGO 的局部位置加到参考点上
-                Vector3d local_xyz(res.pose.x(), res.pose.y(), res.pose.z());
-                Vector3d geo_pos = LocalToGeo(local_xyz, align_cfg.pos_ref, glv);
-                
-                Vector3d bg = res.bias.gyroscope() * glv.rad * 3600.0; 
-                Vector3d ba = res.bias.accelerometer() / glv.ug;       
-
-                fgo_log << fixed << setprecision(9) 
-                        << res.time << ","
-                        << geo_pos(0)*glv.rad << "," << geo_pos(1)*glv.rad << "," << geo_pos(2) << ","
-                        << res.vel(0) << "," << res.vel(1) << "," << res.vel(2) << ","
-                        << att_deg(0) << "," << att_deg(1) << "," << att_deg(2) << ","
-                        << bg(0) << "," << bg(1) << "," << bg(2) << ","
-                        << ba(0) << "," << ba(1) << "," << ba(2) << endl;
-            }
-        }
+        if (d.t > t_align) break; // 只跑前300秒
+        align_engine.Step(d.wm, d.vm, d.t);
     }
 
-    cout << "\n✅ Simulation Finished." << endl;
-    return 0;
-}
+    // 获取对准结果
+    Matrix3d Cnb_aligned = INSMath::q2mat(align_engine.GetQnb());
+    Vector3d eb_est = align_engine.GetBiasGyro();
+    Vector3d db_est = align_engine.GetBiasAcc();
+    
+    cout << "[Align Result] T=300s" << endl;
+    cout << "  Att (deg): " << (INSMath::m2att(Cnb_aligned) * glv.rad).transpose() << endl;
+    cout << "  EB (deg/h):" << (eb_est * glv.rad * 3600.0).transpose() << endl;
+    cout << "  DB (ug):   " << (db_est / glv.ug).transpose() << endl;
 
-// -----------------------------------------------------------------------
-// 保持原样的数据加载函数
-// -----------------------------------------------------------------------
-std::vector<IMUData> load_and_process_data(const std::string& filename, double ts, double target_g) {
-    std::vector<Vector3d> raw_gyro, raw_acc;
-    std::ifstream file(filename);
-    std::string line;
+    // ---------------------------------------------------------
+    // 步骤 B: 数据回补 (Rotation Compensation)
+    // ---------------------------------------------------------
+    cout << "\nStep 2: Rotating raw data to N-Frame (0,0,0)..." << endl;
     
-    if (!file.is_open()) { cerr << "Error: Cannot open " << filename << endl; return {}; }
+    vector<IMUData> rotated_data;
+    rotated_data.reserve(all_data.size());
+
+    for (const auto& d : all_data) {
+        IMUData d_new = d;
+        // [关键逻辑] 将 b 系增量左乘 Cnb，投影到 n 系
+        // 这样新的 d_new 看起来就像是一个水平放置(姿态为0)的 IMU 输出的数据
+        d_new.wm = Cnb_aligned * d.wm; 
+        d_new.vm = Cnb_aligned * d.vm;
+        rotated_data.push_back(d_new);
+    }
+
+    // ---------------------------------------------------------
+    // 步骤 C: 零姿态纯惯导验证
+    // ---------------------------------------------------------
+    cout << "\nStep 3: Running Zero-Attitude Pure INS Verification..." << endl;
+
+    // 1. 初始化纯导状态
+    // 注意：这里姿态强制设为 0 (Identity Matrix)
+    Vector3d att_zero = Vector3d::Zero(); 
+    Vector3d vn_zero  = Vector3d::Zero();
+    Earth eth(glv);
+    eth.eupdate(align_cfg.pos_ref, vn_zero);
+
+    INSState ins_verify(att_zero, vn_zero, align_cfg.pos_ref, ts, eth);
     
-    while (std::getline(file, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.empty()) continue;
-        std::stringstream ss(line);
-        std::string cell;
-        std::vector<double> vals;
-        try {
-            while (std::getline(ss, cell, ',')) {
-                cell.erase(std::remove(cell.begin(), cell.end(), '\r'), cell.end()); 
-                if (!cell.empty()) vals.push_back(std::stod(cell));
-            }
-        } catch (...) { continue; } 
+    // 2. 注入刚才对准估出来的零偏 (补偿掉，看残差)
+    ins_verify.set_bias(eb_est, db_est);
+    ins_verify.vertical_damping_mode = 1; // 开启高程阻尼，方便看水平发散
+
+    // 3. 准备记录
+    string out_name = "res_rotated_ins.csv";
+    ofstream out_file(out_name);
+    out_file << "t,lat,lon,h,vn,ve,vd,roll,pitch,yaw,bg_x,bg_y,bg_z,ba_x,ba_y,ba_z,status" << endl;
+    out_file << fixed << setprecision(9);
+
+    int log_cnt = 0;
+    for (const auto& d : rotated_data) {
         
-        if (vals.size() >= 6) {
-            raw_gyro.push_back(Vector3d(vals[0], vals[1], vals[2]));
-            raw_acc.push_back(Vector3d(vals[3], vals[4], vals[5]));
+        // 纯惯导更新
+        ins_verify.update(d.wm, d.vm, glv, eth);
+
+        // 记录
+        if (++log_cnt % 40 == 0) { // 10Hz 记录
+            Vector3d att_deg = ins_verify.att * glv.rad;
+            Vector3d pos_deg = ins_verify.pos; 
+            pos_deg(0) *= glv.rad; pos_deg(1) *= glv.rad;
+            
+            // 此时的 eb/db 是固定的补偿值
+            Vector3d eb_show = ins_verify.eb * glv.rad * 3600.0;
+            Vector3d db_show = ins_verify.db / glv.ug;
+
+            out_file << d.t << ","
+                     << pos_deg(0) << "," << pos_deg(1) << "," << pos_deg(2) << ","
+                     << ins_verify.vn(0) << "," << ins_verify.vn(1) << "," << ins_verify.vn(2) << ","
+                     << att_deg(1) << "," << att_deg(0) << "," << att_deg(2) << "," // R,P,Y
+                     << eb_show(0) << "," << eb_show(1) << "," << eb_show(2) << ","
+                     << db_show(0) << "," << db_show(1) << "," << db_show(2) << ","
+                     << 3 << endl; // Status=3 (Nav)
         }
     }
 
-    if (raw_gyro.empty()) return {};
-
-    Vector3d acc_sum = Vector3d::Zero();
-    for (const auto& a : raw_acc) acc_sum += a;
-    Vector3d acc_mean_raw = acc_sum / raw_acc.size();
-    
-    double norm_meas = acc_mean_raw.norm();
-    double scale_ratio = (norm_meas > 1e-5) ? target_g / norm_meas : 1.0; 
-    
-    cout << "  Scale Ratio: " << scale_ratio << endl;
-
-    std::vector<IMUData> data;
-    double t_curr = 0.0;
-    for (size_t i = 0; i < raw_gyro.size(); ++i) {
-        IMUData d;
-        d.wm = raw_gyro[i] * ts;          
-        d.vm = (raw_acc[i] * scale_ratio) * ts; 
-        d.t = t_curr;
-        data.push_back(d);
-        t_curr += ts;
-    }
-    return data;
-}
-
-Vector3d LocalToGeo(const Vector3d& xyz_enu, const Vector3d& pos_ref_rad, const GLV& glv) {
-    double lat = pos_ref_rad(0); double h = pos_ref_rad(2);
-    double sl = sin(lat); double cl = cos(lat); 
-    double e2 = glv.e2; double Re = glv.Re;
-    double sq = sqrt(1.0 - e2 * sl * sl);
-    double RN = Re / sq; double RM = RN * (1.0 - e2) / (1.0 - e2 * sl * sl); 
-    return Vector3d(lat + xyz_enu(1)/(RM+h), pos_ref_rad(1) + xyz_enu(0)/((RN+h)*cl), h + xyz_enu(2));
+    cout << "Finished. Results saved to " << out_name << endl;
+    return 0;
 }

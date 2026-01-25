@@ -2,16 +2,16 @@
 
 GLV::GLV() {
     // 基础单位与常数
-    deg = M_PI / 180.0;
-    rad = 180.0 / M_PI;
+    deg = M_PI / 180.0; //deg->rad
+    rad = 180.0 / M_PI; //rad->deg
     sec = 1.0;
     min = 60.0;
     hour = 3600.0;
     ppm = 1e-6;
-    dph = deg / hour;
-    dpsh = deg / sqrt(hour);
-    arcmin = deg / 60.0;
-    arcsec = deg / 3600.0;
+    dph = deg / hour; // 1dph=pi/180/3600 rad/s
+    dpsh = deg / sqrt(hour); // 1dpsh=pi/180/sqrt(3600) rad/sqrt(s)
+    arcmin = deg / 60.0; // 1arcmin=pi/180/60 rad
+    arcsec = deg / 3600.0; // 1arcsec=pi/180/3600 rad
 
     // WGS-84 椭球体参数
     Re = 6.378136998405e6;
@@ -26,8 +26,7 @@ GLV::GLV() {
     beta = 2.5 * m - f;
     beta1 = 0.125 * (5.0 * m * f - f * f);
 
-    // 初始位置设置：pos = [lat, lon, h] 
-    // MATLAB: glv.pos = [[32.02..., 118.85...] * deg, 17]
+    // 初始位置设置：pos = [lat, lon, h] (rad, rad, m)
     pos << 32.028611111111111 * deg, 118.85333333333333e+02 * deg, 17.0;
 
     // 初始地球参数计算 (einit 逻辑)
@@ -49,7 +48,7 @@ GLV::GLV() {
     gL = gL * (1.0 - 2.0 * hR - 5.0 * hR * hR);
     
     gn << 0.0, 0.0, -gL;
-    g = std::abs(gn(2)); // C++ Z轴索引为2
+    g = std::abs(gn(2)); 
     
     // 其他单位
     ug = 1e-6 * g;
@@ -64,7 +63,6 @@ GLV::GLV() {
     ts = 1.0 / 400.0;
 
     // 补偿系数初始化 (圆锥/划船补偿)
-    // 使用 Eigen 的 RowMajor 存储或直接赋值
     cs.setZero(5, 5); 
     cs.row(0) << 2.0/3.0,    0.0,      0.0,      0.0,      0.0;
     cs.row(1) << 9.0/20.0,   27.0/20.0, 0.0,      0.0,      0.0;
