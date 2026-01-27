@@ -7,27 +7,33 @@
 
 using namespace Eigen;
 
-class INSMath {
-public:
-    // 基础运算
-    static Matrix3d askew(const Vector3d& v);   // 反对称矩阵 [v×]
+namespace INSMath {
 
-    // 姿态转换 (严格 3-1-2 顺序)
-    static Matrix3d rv2m(const Vector3d& rv);               // RV -> Cnb
-    static Quaterniond rv2q(const Vector3d& rv);            // RV -> qnb
-    static Matrix3d a2mat(const Vector3d& att);             // Euler -> Cnb
-    static Quaterniond a2qua(const Vector3d& att);          // Euler -> qnb
-    static Vector3d m2att(const Matrix3d& Cnb);             // Cnb -> Euler
-    static Matrix3d q2mat(const Quaterniond& qnb);          // qnb -> Cnb
-    static Quaterniond m2qua(const Matrix3d& Cnb);          // Cnb -> qnb
-    static Vector3d q2rv(const Quaterniond& qnb);           // qnb -> RV
+    // --- 基础运算 ---
+    Matrix3d askew(const Vector3d& v);
 
-    // 核心算法
-    static Quaterniond qupdt2(const Quaterniond& qnb0, const Vector3d& rv_ib, const Vector3d& rv_in); 
-    static Vector3d aa2phi(const Vector3d& att1, const Vector3d& att0); // 计算失准角 phi
+    // --- 旋转矢量 <-> 矩阵/四元数 ---
+    Matrix3d rv2m(const Vector3d& rv);
+    Quaterniond rv2q(const Vector3d& rv);
 
-    // 辅助工具
-    static Vector3d r2dms(double rad, const GLV& glv);      // Rad -> DMS
+    // --- 欧拉角 <-> 矩阵/四元数 (用户自定义顺序) ---
+    Matrix3d a2mat(const Vector3d& att);
+    Quaterniond a2qua(const Vector3d& att);
+    
+    // --- 四元数 <-> 矩阵/旋转矢量 ---
+    Matrix3d q2mat(const Quaterniond& qnb);
+    Vector3d q2rv(const Quaterniond& qnb);
+
+    // --- 矩阵 <-> 四元数/欧拉角 ---
+    Quaterniond m2qua(const Matrix3d& Cnb);
+    Vector3d m2att(const Matrix3d& Cnb);
+    
+    // --- 核心更新 ---
+    Quaterniond qupdt2(const Quaterniond& qnb0, const Vector3d& rv_ib, const Vector3d& rv_in);
+    Vector3d aa2phi(const Vector3d& att1, const Vector3d& att0);
+
+    // --- 工具 ---
+    Vector3d r2dms(double rad, const GLV& glv);
 };
 
 #endif

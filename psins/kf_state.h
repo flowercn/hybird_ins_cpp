@@ -2,7 +2,6 @@
 #define KF_STATE_H
 
 #include <Eigen/Dense>
-#include "ins_state.h"
 #include "glv.h"
 
 using namespace Eigen;
@@ -25,22 +24,13 @@ public:
     VectorXd yk; MatrixXd Kk;
 
     KFAlignVN();
-
-    // 初始化 (对应 avnkfinit)
     void Init(double nts, const GLV& glv, 
               double phi0, double web_psd, double wdb_psd, 
               double eb_sigma, double db_sigma, double wvn_err);
 
-    // 状态转移矩阵更新 (对应 loop 中的 kf.Phikk_1 更新)
-    // 需要传入 dvn 和 Cnb 用于构建矩阵块
     void UpdatePhi(const Vector3d& dvn, const Matrix3d& Cnb, const Vector3d& wnie, double nts);
-
-    // 测量更新 (对应 kfupdate)
     void Update(const Vector3d& vn_meas);
-
-    // 反馈 (对应 alignvn.m 底部独特的 0.91/0.09 反馈逻辑)
-    // 注意：alignvn.m 修改了输入的 qnb 和 vn
-    void Feedback(Quaterniond& qnb, Vector3d& vn);
+    void Feedback(Quaterniond& qnb, Vector3d& vn, Vector3d& eb, Vector3d& db, Matrix3d& Cnb);
 };
 
 #endif // KF_STATE_H

@@ -1,25 +1,36 @@
 #pragma once
 #include <Eigen/Dense>
-#include "glv.h" // 引用物理常数类
+#include "glv.h"
 
 using namespace Eigen;
 
 class Earth {
 public:
-    // 物理常数备份 (由 GLV 初始化时提供)
-    double Re, wie, f, e2, g0, beta, beta1;
+    double Re, wie, f, e2, g0;
+    double beta, beta1;
 
-    // 实时计算的地理参数 (n系)
-    double RMh, RNh, clRNh;
-    Vector3d wien, wenn, winn, wcor;
-    Vector3d gn, gcc;
+    Vector3d pos;  // 当前位置 (lat, lon, h)
+    Vector3d vn;   // 当前速度 (vn, ve, vd)
+    
+    double sl, cl, tl, sl2; // sin(lat), cos(lat), tan(lat)...
+    double RMh, RNh, clRNh; // 子午圈/卯酉圈半径
+    
+    Vector3d wien; // 地球自转角速度 (n系)
+    Vector3d wenn; // 运输率 (n系)
+    Vector3d winn; // wien + wenn
+    Vector3d gn;   // 当地重力向量
+    Vector3d gcc;  // 哥氏/向心加速度 (有害加速度)
 
-    // 中间变量存储
-    double sl, cl, tl, sl2;
-
-    // 默认构造
     Earth() = default;
-    // 对应 MATLAB 的 einit(): 使用 GLV 常数初始化
-    Earth(const GLV& glv);
-    void eupdate(const Vector3d& pos, const Vector3d& vn);
-}; 
+    Earth(const GLV& glv) {
+        this->Re = glv.Re;
+        this->wie = glv.wie;
+        this->f = glv.f;
+        this->e2 = glv.e2;
+        this->g0 = glv.g0;
+        this->beta = glv.beta;
+        this->beta1 = glv.beta1;
+    }
+
+    void update(const Vector3d& pos, const Vector3d& vn);
+};

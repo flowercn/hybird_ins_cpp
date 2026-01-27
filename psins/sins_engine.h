@@ -2,8 +2,6 @@
 #define SINS_ENGINE_H
 
 #include <vector>
-#include <iostream>
-#include <fstream>
 #include <Eigen/Dense>
 #include "glv.h"
 #include "earth.h"
@@ -11,91 +9,90 @@
 #include "ins_state.h"
 #include "kf_state.h"
 
+struct IMUData {
+    double t;
+    Eigen::Vector3d wm; // 增量 rad
+    Eigen::Vector3d vm; // 增量 m/s
+};
+
 struct AlignResult {
-    Eigen::Vector3d att; 
-    Eigen::Vector3d vn;  
-    Eigen::Vector3d pos; 
-    Eigen::Vector3d eb;  
-    Eigen::Vector3d db;  
-    bool success;
+    bool valid = false;
+    double align_time = 0.0;     // 对准持续时长
+    Eigen::Vector3d att;         // 姿态 (rad)
+    Eigen::Vector3d vel;         // 速度
+    Eigen::Vector3d pos;         // 位置
+    Eigen::Vector3d eb;          // 陀螺零偏
+    Eigen::Vector3d db;          // 加计零偏
 };
 
-struct IMUData { 
-    Eigen::Vector3d wm, vm; 
-    double t; 
-};
+struct KFConfig {
+    Eigen::Vector3d phi_init_err = {0.1*M_PI/180, 0.1*M_PI/180, 1.0*M_PI/180}; 
+    Eigen::Vector3d wvn_err      = {0.01, 0.01, 0.01};          
+    // P0: 初始陀螺零偏不确定度 (对应"逐次启动重复性"，通常比Allan谷底大2个数量级，给 0.5 deg/h 以便快速收敛)
+    double eb_sigma = 0.5 * M_PI/180 / 3600.0;              
+    
+    // P0: 初始加计零偏不确定度 (1000ug，给大一点让它敢于估计)
+    double db_sigma = 1000.0 * 1e-6 * 9.78;
 
-struct AlignConfig {
-    Eigen::Vector3d att_ref;      
-    Eigen::Vector3d pos_ref;      
-    Eigen::Vector3d phi_init_err; 
-    Eigen::Vector3d wvn_err;      
-    double eb_sigma;   
-    double db_sigma;   
-    double web_psd;    
-    double wdb_psd;    
-};
-
-enum class EngineState {
-    IDLE,            
-    COARSE_ALIGNING, 
-    FINE_ALIGNING,   
-    NAVIGATING,      
-    FAULT            
+    // Qk: 角速度随机游走 (ARW, 对应Allan图 tau=1 处的值)
+    double web_psd  = 0.1 * M_PI/180 / 60.0;               
+    
+    // Qk: 速度随机游走 (VRW, 对应加计白噪声)
+    double wdb_psd  = 100.0 * 1e-6 * 9.78;
 };
 
 class SinsEngine {
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
+    // 基础模块
     GLV glv;
     Earth eth;
     INSState ins;       
-    EngineState state;
+    KFConfig kf_cfg;
 
-    AlignConfig align_cfg;  
-    double coarse_duration; 
-    double fine_duration;   
+    // 配置备份
+    AlignResult res_init;   // 初始默认值 (Sins_Init 设定)
+    AlignResult res_coarse; // 粗对准产出
+    AlignResult res_fine;   // 精对准产出 
 
-    // Coarse 变量
-    Eigen::Vector3d coarse_acc_wm; 
-    Eigen::Vector3d coarse_acc_vm; 
-    int coarse_sample_cnt;         
+    Eigen::Vector3d coarse_sum_wm, coarse_sum_vm;
+    double coarse_timer;       
 
-    // Fine/KF 变量
-    KFAlignVN align_kf;            
-    Eigen::Quaterniond align_qnb;  
-    Eigen::Vector3d align_vn;      
-    Eigen::Vector3d align_pos;     
-    
-    // 缓冲逻辑
-    int align_step_counter;
-    int align_nn;
-    double align_nts;
-    IMUData align_last_data; 
-    bool align_finished;
-
-    // --- [新增] 迭代对准核心变量 ---
-    int kf_round;                  // 当前是第几轮 KF (1 或 2)
-    double time_kf_switch;         // 第一轮结束、切换第二轮的时间点
-    double scale_ratio;            // 自动计算的加速度标度系数
-    Eigen::Vector3d accum_bias_gyro; // 第一轮估计并固化的陀螺零偏
-    Eigen::Vector3d accum_bias_acc;  // 第一轮估计并固化的加计零偏
-
+    KFAlignVN kf;
+    Eigen::Quaterniond kf_qnb;
+    Eigen::Vector3d kf_vn, kf_pos;
+    struct { Eigen::Vector3d wm, vm; } kf_last_imu;
+    bool kf_first_step;    
+    Eigen::Vector3d kf_base_eb, kf_base_db;
+    double scale_ratio = 1.0;
+public:   
     SinsEngine(double ts = 1.0/400.0);
-    void Init(const AlignConfig& cfg, double coarse_time_s, double fine_time_s);
-    void Step(const Eigen::Vector3d& wm, const Eigen::Vector3d& vm, double t);
 
-    // Getters
-    Eigen::Vector3d GetAttDeg() const; 
-    Eigen::Vector3d GetVel() const;    
-    Eigen::Vector3d GetPosDeg() const; 
-    Eigen::Vector3d GetBiasGyro() const; 
-    Eigen::Vector3d GetBiasAcc() const;  
-    Eigen::Quaterniond GetQnb() const;
-    void InjectBias(const Eigen::Vector3d& db_gyro, const Eigen::Vector3d& db_acc);
+    void Sins_Init(const Eigen::Vector3d& init_pos, // [Lat, Lon, H]
+                   const Eigen::Vector3d& init_vel, // [Ve, Vn, Vu]
+                   const Eigen::Vector3d& init_att, // [Pitch, Roll, Yaw]
+                   const Eigen::Vector3d& init_eb,  // [Gx, Gy, Gz]
+                   const Eigen::Vector3d& init_db); // [Ax, Ay, Az]
+    void SetKFConfig(const KFConfig& cfg);
 
-    static Eigen::Vector3d AlignCoarse(const Eigen::Vector3d& wmm, const Eigen::Vector3d& vmm, double latitude);
+    void Run_Coarse_Phase(const std::vector<IMUData>& data_chunk);
+    void Run_Fine_Phase(const std::vector<IMUData>& data_chunk);
+    void Run_Nav_Phase(const std::vector<IMUData>& data_chunk);    
+
+    Eigen::Vector3d GetAttDeg() const;    // 输出: [Pitch, Roll, Yaw] (deg)
+    Eigen::Vector3d GetVel() const;       // 输出: [Ve, Vn, Vu] (m/s)
+    Eigen::Vector3d GetPosDeg() const;    // 输出: [Lat, Lon, H] (deg, deg, m)
+    Eigen::Vector3d GetBiasGyro() const;  // 输出: [Gx, Gy, Gz] (deg/h)
+    Eigen::Vector3d GetBiasAcc() const;   // 输出: [Ax, Ay, Az] (ug)
+    Eigen::Quaterniond GetQnb() const;    // 输出: 四元数
+
+    void Step_Coarse(const Eigen::Vector3d& wm, const Eigen::Vector3d& vm);
+    void Step_Fine(const Eigen::Vector3d& wm, const Eigen::Vector3d& vm);
+    void Step_Nav(const Eigen::Vector3d& wm, const Eigen::Vector3d& vm);
+    void Finish_Coarse();
+    void Finish_Fine();    
+
 };
 
 #endif // SINS_ENGINE_H

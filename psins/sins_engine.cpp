@@ -1,333 +1,240 @@
 #include "sins_engine.h"
-#include "ins_math.h"
-#include <iomanip>
-#include <cmath>
+#include <iostream>
 
 using namespace std;
 using namespace Eigen;
 
-SinsEngine::SinsEngine(double ts) : state(EngineState::IDLE), coarse_duration(0), fine_duration(0) {
+SinsEngine::SinsEngine(double ts) 
+    : eth(GLV()), 
+      ins(Vector3d::Zero(), Vector3d::Zero(), Vector3d::Zero(), ts, eth) 
+{
     ins.ts = ts;
-    align_finished = false;
-    kf_round = 0;
-    scale_ratio = 1.0;
-    accum_bias_gyro.setZero();
-    accum_bias_acc.setZero();
 }
 
-void SinsEngine::Init(const AlignConfig& cfg, double coarse_time_s, double fine_time_s) {
-    this->align_cfg = cfg;
-    this->coarse_duration = coarse_time_s;
-    this->fine_duration = fine_time_s;
-    
-    // 设定第二轮 KF 的切换时间点 (例如精对准进行到一半时)
-    // 这里设定为: 粗对准结束后的 100 秒进行切换
-    this->time_kf_switch = coarse_duration + 100.0; 
-    if (this->time_kf_switch >= coarse_duration + fine_duration) {
-        this->time_kf_switch = coarse_duration + fine_duration * 0.5;
-    }
-
+void SinsEngine::Sins_Init(const Vector3d& init_pos, 
+                           const Vector3d& init_vel, 
+                           const Vector3d& init_att, 
+                           const Vector3d& init_eb, 
+                           const Vector3d& init_db) {
+    // 1. 刷新地球模型
     eth = Earth(glv);
-    
-    coarse_acc_wm.setZero();
-    coarse_acc_vm.setZero();
-    coarse_sample_cnt = 0;
-    kf_round = 0;
-    scale_ratio = 1.0;
-    accum_bias_gyro.setZero();
-    accum_bias_acc.setZero();
+    eth.update(init_pos, init_vel);
 
-    state = EngineState::COARSE_ALIGNING;
+    // 2. 填充初始结果
+    res_init.valid = true;
+    res_init.align_time = 0.0;
     
-    cout << "------------------------------------------------" << endl;
-    cout << "[SinsEngine] Initialized Robust Iterative Alignment:" << endl;
-    cout << "  Phase 1: Analytic Coarse Align (0 ~ " << coarse_duration << " s)" << endl;
-    cout << "  Phase 2: KF Round 1 (Large P0) (" << coarse_duration << " ~ " << time_kf_switch << " s)" << endl;
-    cout << "  Phase 3: KF Round 2 (Refinement) (" << time_kf_switch << " ~ " << (coarse_duration + fine_duration) << " s)" << endl;
-    cout << "------------------------------------------------" << endl;
+    res_init.pos = init_pos;
+    res_init.vel = init_vel;
+    res_init.att = init_att;
+    res_init.eb  = init_eb;
+    res_init.db  = init_db;
+
+    // 3. 重置
+    res_coarse.valid = false;
+    res_fine.valid = false;
+    
+    coarse_sum_wm.setZero();
+    coarse_sum_vm.setZero();
+    coarse_timer = 0.0;
+    
+    cout << "[Sins] Initialized state directly." << endl;
 }
 
-// 静态粗对准逻辑 (保持不变)
-Vector3d SinsEngine::AlignCoarse(const Vector3d& w_avg, const Vector3d& f_avg, double latitude) {
-    Vector3d gn_ref(0, 0, 1); 
-    Vector3d wie_n(0, std::cos(latitude), std::sin(latitude));
-    Vector3d fb_meas = f_avg.normalized();
-    Vector3d wb_meas = w_avg.normalized();
-
-    // 构造导航系矩阵 Mn
-    Vector3d r_up_n = gn_ref; 
-    Vector3d r_east_n = wie_n.cross(r_up_n).normalized(); 
-    Vector3d r_north_n = r_up_n.cross(r_east_n).normalized();
-    Matrix3d Mn; Mn << r_east_n, r_north_n, r_up_n;
-
-    // 构造机体系矩阵 Mb
-    Vector3d r_up_b = fb_meas; 
-    Vector3d r_east_b = wb_meas.cross(r_up_b).normalized();
-    Vector3d r_north_b = r_up_b.cross(r_east_b).normalized();
-    Matrix3d Mb; Mb << r_east_b, r_north_b, r_up_b;
-
-    Matrix3d Cnb = Mn * Mb.transpose();
-    return INSMath::m2att(Cnb);
+void SinsEngine::SetKFConfig(const KFConfig& cfg) {
+    this->kf_cfg = cfg;
 }
 
-void SinsEngine::Step(const Vector3d& wm, const Vector3d& vm, double t) {
-    if (wm.hasNaN() || vm.hasNaN()) {
-        cerr << "[SINS-FATAL] NaN input detected at t=" << t << endl;
-        state = EngineState::FAULT;
+// --- 粗对准 ---
+void SinsEngine::Run_Coarse_Phase(const std::vector<IMUData>& data_chunk) {
+    if (data_chunk.empty()) {
+        cout << "[Coarse] Skipped (No Data)." << endl;
         return;
     }
-    if (state == EngineState::FAULT) return;
+    coarse_sum_wm.setZero();
+    coarse_sum_vm.setZero();
+    coarse_timer = 0.0;
 
-    // ==============================================================================
-    // 阶段 1: 粗对准 (Accumulate & Average)
-    // ==============================================================================
-    if (state == EngineState::COARSE_ALIGNING) {
-        coarse_acc_wm += wm; 
-        coarse_acc_vm += vm; 
-        coarse_sample_cnt++;
-
-        if (t >= coarse_duration) {
-            cout << "\n[SinsEngine] >>> Coarse Alignment Finished at t=" << t << "s" << endl;
-
-            // 1. 计算均值
-            double total_time = coarse_sample_cnt * ins.ts;
-            Vector3d w_avg = coarse_acc_wm / total_time; 
-            Vector3d f_avg = coarse_acc_vm / total_time; 
-
-            // 2. 自动计算 Scale Ratio (解决重力模长不匹配问题)
-            eth.eupdate(align_cfg.pos_ref, Vector3d::Zero());
-            double local_g = eth.gn.norm();
-            double data_g  = f_avg.norm();
-            this->scale_ratio = local_g / data_g;
-            
-            cout << "  [Auto-Scale] Local G: " << local_g << ", Data G: " << data_g 
-                 << ", Ratio: " << scale_ratio << endl;
-            
-            // 应用 Scale
-            f_avg *= scale_ratio;
-
-            // 3. 执行解析粗对准
-            // 使用算出来的 att_coarse，而不是配置的 att_ref！
-            Vector3d att_coarse = SinsEngine::AlignCoarse(w_avg, f_avg, align_cfg.pos_ref(0));
-            cout << "  [Result] Coarse Att: " << (att_coarse * glv.rad).transpose() << " (Will be used as Initial Guess)" << endl;
-
-            // 4. 初始化 KF Round 1
-            // 策略：使用 Coarse 结果初始化，但给非常大的 P0，允许 KF 大幅修正
-            eth.eupdate(align_cfg.pos_ref, Vector3d::Zero());
-            align_vn.setZero();
-            align_pos = align_cfg.pos_ref;
-            align_qnb = INSMath::a2qua(att_coarse); // <--- 关键：使用粗对准结果
-            
-            align_nn = 2; 
-            align_nts = align_nn * ins.ts;
-            align_step_counter = 0;
-            
-            // 初始化 KF
-            align_kf.Init(align_nts, glv, 0.0, align_cfg.web_psd, align_cfg.wdb_psd, align_cfg.eb_sigma, align_cfg.db_sigma, align_cfg.wvn_err(0));    
-
-            // 设置宽松的 P0 (Large Uncertainty)
-            // 例如：水平 1度，方位 5度
-            Vector3d large_phi_err; 
-            large_phi_err << 1.0, 1.0, 5.0; 
-            large_phi_err *= glv.deg;
-            align_kf.Pxk.block<3,3>(0,0) = large_phi_err.array().square().matrix().asDiagonal();
-            
-            kf_round = 1;
-            state = EngineState::FINE_ALIGNING;
-            cout << "[SinsEngine] Switched to KF Round 1 (Pull-in Phase, Large P0)." << endl;
-        }
+    for (const auto& d : data_chunk) {
+        Step_Coarse(d.wm, d.vm);
     }
+    Finish_Coarse();
+}
+
+void SinsEngine::Step_Coarse(const Vector3d& wm, const Vector3d& vm) {
+    coarse_sum_wm += wm;
+    coarse_sum_vm += vm;
+    coarse_timer += ins.ts;
+}
+
+void SinsEngine::Finish_Coarse() {
+    if (coarse_timer < 0.1) return;
+
+    Vector3d w_avg = coarse_sum_wm / coarse_timer;
+    Vector3d f_avg = coarse_sum_vm / coarse_timer;
     
-    // ==============================================================================
-    // 阶段 2: 精对准 (Iterative KF)
-    // ==============================================================================
-    else if (state == EngineState::FINE_ALIGNING) {
-        
-        // ------------------------------------------------------------------
-        // 数据预处理：应用 Scale 和 上一轮固化的 Bias
-        // ------------------------------------------------------------------
-        Vector3d vm_scaled = vm * this->scale_ratio;
-        Vector3d wm_comp = wm - accum_bias_gyro * ins.ts;
-        Vector3d vm_comp = vm_scaled - accum_bias_acc * ins.ts;
+    // 解析对准
+    // [Fix] 这里的 (0,0,1) 指的是当地地理坐标系的"天向"单位矢量，而非重力
+    Vector3d up_ref(0, 0, 1); 
+    double lat = res_init.pos(0);
+    Vector3d wie_n(0, cos(lat), sin(lat));
 
-        // ------------------------------------------------------------------
-        // 双子样累加
-        // ------------------------------------------------------------------
-        if (align_step_counter == 0) {
-            align_last_data.wm = wm_comp;
-            align_last_data.vm = vm_comp;
-            align_last_data.t = t;
-            align_step_counter++;
-            return; // 等待下一帧
-        }
-        
-        // align_step_counter == 1
-        const auto& d1 = align_last_data;
-        Vector3d wmm = d1.wm + wm_comp;
-        Vector3d vmm = d1.vm + vm_comp;
-        
-        // 误差补偿
-        Vector3d dphim = 2.0/3.0 * d1.wm.cross(wm_comp);
-        Vector3d phim = wmm + dphim; 
-        Vector3d scullm = 2.0/3.0 * (d1.wm.cross(vm_comp) + d1.vm.cross(wm_comp));
-        Vector3d rotm = 0.5 * wmm.cross(vmm);
-        Vector3d dvbm = vmm + rotm + scullm;
-
-        // 机械编排
-        Matrix3d Cnn = INSMath::rv2m(-eth.wien * align_nts / 2.0); 
-        Matrix3d Cnb = INSMath::q2mat(align_qnb); 
-        Vector3d dvn = Cnn * Cnb * dvbm;
-        align_vn = align_vn + dvn + eth.gn * align_nts;
-        
-        Vector3d rv_phi = phim;
-        Vector3d rv_zeta = eth.winn * align_nts; 
-        align_qnb = INSMath::qupdt2(align_qnb, rv_phi, rv_zeta);
-
-        // KF Update
-        align_kf.UpdatePhi(dvn, Cnb, eth.wien, align_nts);
-        align_kf.Update(align_vn); 
-        align_kf.Feedback(align_qnb, align_vn);
-        
-        align_step_counter = 0;
-
-        // ------------------------------------------------------------------
-        // 逻辑检查：切换 Round 2 或 结束
-        // ------------------------------------------------------------------
-        
-        // [切换到 Round 2]
-        if (kf_round == 1 && t >= time_kf_switch) {
-            cout << "\n[SinsEngine] >>> KF Round 1 Finished at t=" << t << "s." << endl;
-            
-            // 1. 提取当前 KF 估计出的零偏
-            Vector3d est_eb = align_kf.xk.segment<3>(6);
-            Vector3d est_db = align_kf.xk.segment<3>(9);
-            
-            // 2. 固化到 accum_bias 中
-            accum_bias_gyro += est_eb;
-            accum_bias_acc  += est_db;
-            
-            cout << "  [Round 1 Result] EB: " << (accum_bias_gyro * glv.rad * 3600.0).transpose() << " deg/h" << endl;
-            cout << "  [Round 1 Result] DB: " << (accum_bias_acc / glv.ug).transpose() << " ug" << endl;
-            
-            // 3. 重置 KF (Re-Init)
-            align_kf.xk.setZero(); 
-            align_kf.Pxk.setIdentity(); 
-            
-            // 4. 设置精细的 P0 (Small Uncertainty)
-            Vector3d small_phi_err; 
-            small_phi_err << 0.02, 0.02, 0.1; // 0.1度航向误差
-            small_phi_err *= glv.deg;
-            
-            // ========================= [修正点] =========================
-            // 原错误代码: Vector3d p_diag(12); 
-            // 修正为 VectorXd (动态大小) 或 Matrix<double, 12, 1>
-            VectorXd p_diag(12); 
-            // ============================================================
-
-            p_diag << small_phi_err(0), small_phi_err(1), small_phi_err(2), // phi
-                      0.1, 0.1, 0.1,                                        // dv
-                      align_cfg.eb_sigma * 0.5, align_cfg.eb_sigma * 0.5, align_cfg.eb_sigma * 0.5, // eb
-                      align_cfg.db_sigma * 0.5, align_cfg.db_sigma * 0.5, align_cfg.db_sigma * 0.5; // db
-            
-            align_kf.Pxk = p_diag.array().square().matrix().asDiagonal();
-            
-            kf_round = 2;
-            cout << "[SinsEngine] Switched to KF Round 2 (Refinement, Small P0, Bias Fixed)." << endl;
-        }
-        
-        // [精对准完全结束]
-        if (t >= (coarse_duration + fine_duration)) {
-             cout << "\n[SinsEngine] >>> Fine Alignment (All Rounds) Finished." << endl;
-             
-             // 最终结果 = 系统状态 + KF残差状态
-             AlignResult res;
-             res.att = INSMath::m2att(INSMath::q2mat(align_qnb)); 
-             res.pos = align_pos;
-             res.vn  = align_vn;
-             
-             // 最终零偏 = 固化零偏 + KF残差零偏
-             res.eb = accum_bias_gyro + align_kf.xk.segment<3>(6);
-             res.db = accum_bias_acc  + align_kf.xk.segment<3>(9);
-             
-             cout << "  [Nav Start] Att:   " << (res.att * glv.rad).transpose() << endl;
-             cout << "  [Nav Start] EB:    " << (res.eb * glv.rad * 3600.0).transpose() << endl;
-             cout << "  [Nav Start] DB:    " << (res.db / glv.ug).transpose() << endl;
-             
-             // 初始化导航状态
-             eth.eupdate(align_cfg.pos_ref, Vector3d::Zero());
-             ins = INSState(res.att, Vector3d::Zero(), align_cfg.pos_ref, ins.ts, eth);
-             ins.set_bias(res.eb, res.db); 
-             
-             ins.is_align = false;
-             ins.vertical_damping_mode = 1; 
-             ins.vn(2) = 0.0;               
-
-             state = EngineState::NAVIGATING; 
-        }
-    }
+    Vector3d vb = f_avg.normalized();
+    Vector3d wb = w_avg.normalized();
     
-    // ==============================================================================
-    // 阶段 3: 导航
-    // ==============================================================================
-    else if (state == EngineState::NAVIGATING) {
-        // 注意：导航阶段也要应用 scale_ratio ！
-        Vector3d vm_scaled = vm * this->scale_ratio;
-        ins.update(wm, vm_scaled, glv, eth);
-        
-        if (ins.qnb.coeffs().hasNaN() || ins.pos.hasNaN()) {
-            cerr << "[SINS-FATAL] Algorithm Diverged at t=" << t << endl;
-            state = EngineState::FAULT;
-        }
+    // 构造 n 系基准向量 (East, North, Up)
+    Vector3d r_east_n = wie_n.cross(up_ref).normalized();
+    Vector3d r_north_n = up_ref.cross(r_east_n).normalized(); // 注意叉乘顺序: Up x East = North
+    Matrix3d Mn; Mn << r_east_n, r_north_n, up_ref;
+
+    // 构造 b 系测量向量
+    Vector3d r_east_b = wb.cross(vb).normalized();
+    Vector3d r_north_b = vb.cross(r_east_b).normalized();
+    Matrix3d Mb; Mb << r_east_b, r_north_b, vb;
+
+    Matrix3d Cnb = Mn * Mb.transpose();
+    
+    res_coarse.valid = true;
+    res_coarse.align_time = coarse_timer;
+    res_coarse.att = INSMath::m2att(Cnb);
+    res_coarse.vel.setZero();
+    res_coarse.pos = res_init.pos;
+    // 粗对准不估计零偏，清零以防万一
+    res_coarse.eb.setZero();
+    res_coarse.db.setZero();
+}
+
+// --- 精对准 (复用 INS 核心引擎) ---
+void SinsEngine::Run_Fine_Phase(const std::vector<IMUData>& data_chunk) {
+    if (data_chunk.empty()) {
+        cout << "[Fine] Skipped (No Data)." << endl;
+        return;
     }
-}
 
-// Getters ... (保持不变)
-Vector3d SinsEngine::GetAttDeg() const {
-    if (state == EngineState::FINE_ALIGNING) {
-        return INSMath::m2att(INSMath::q2mat(align_qnb)) * glv.rad;
-    } 
-    else if (state == EngineState::COARSE_ALIGNING) {
-        return Vector3d::Zero();
+    // 1. 确定初始状态 (继承粗对准或初始值)
+    AlignResult* start = res_coarse.valid ? &res_coarse : &res_init;
+    
+    if (res_coarse.valid) cout << "[Fine] Starting with Coarse Alignment result." << endl;
+    else cout << "[Fine] Starting with Init/Default result." << endl;
+
+    // 2. 初始化 INS 引擎 (完全重置 INS 状态)
+    // 这一步非常关键，把粗对准的姿态、初始速度(0)、位置、初始零偏(0或预设)装载进 INS
+    eth.update(start->pos, start->vel);
+    ins = INSState(start->att, start->vel, start->pos, ins.ts, eth);
+    ins.set_bias(start->eb, start->db); // 设置初始零偏
+
+    // 3. 初始化 KF
+    // 注意：KF 的初始不确定度 (P阵) 依然来自 kf_cfg
+    kf.Init(ins.ts, glv, 
+            kf_cfg.phi_init_err(0), 
+            kf_cfg.web_psd, 
+            kf_cfg.wdb_psd, 
+            kf_cfg.eb_sigma, 
+            kf_cfg.db_sigma, 
+            kf_cfg.wvn_err(0));
+
+    // 4. 批量步进
+    for (const auto& d : data_chunk) {
+        Step_Fine(d.wm, d.vm);
     }
-    return ins.att * glv.rad;
+
+    Finish_Fine(); 
+    res_fine.align_time = data_chunk.size() * ins.ts;
 }
 
-Vector3d SinsEngine::GetVel() const {
-    if (state == EngineState::FINE_ALIGNING) return align_vn;
-    return ins.vn; 
+void SinsEngine::Step_Fine(const Vector3d& wm, const Vector3d& vm) {
+    // 1. 调用高精度机械编排 (Don't Reinvent the Wheel!)
+    // ins.update 内部会自动执行：
+    //   a. 零偏补偿 (使用当前的 ins.eb/db)
+    //   b. 圆锥/划船误差补偿
+    //   c. 速度/位置更新 (含科氏力、重力)
+    //   d. 姿态更新
+    //   e. 地球参数刷新
+    ins.update(wm, vm, glv, eth);
+
+    // 2. 构造 KF 所需的输入量
+    // KF 需要比力投影增量 dv_n (用于 F 阵中 f^n x phi 项)
+    // 我们可以近似计算：Cnb * (vm - bias*ts)
+    // 这里的 vm 最好是去过零偏的，虽然 KF 对 F 阵精度要求不高，但严谨点好
+    Vector3d vm_pure = vm - ins.db * ins.ts; 
+    Vector3d dv_n_measure = ins.Cnb * vm_pure; 
+
+    // 3. KF 预测与更新
+    // 观测值 Z = V_ins - V_ref (假设零速, V_ref=0) => Z = ins.vn
+    kf.UpdatePhi(dv_n_measure, ins.Cnb, eth.wien, ins.ts);
+    kf.Update(ins.vn); 
+    
+    // 4. [Fix] 全闭环反馈：直接修正 INS 对象的状态！
+    // 传入引用：ins.qnb, ins.vn, ins.eb, ins.db, ins.Cnb
+    // KF 内部会修改这些值，并清空 KF 自身的误差状态
+    kf.Feedback(ins.qnb, ins.vn, ins.eb, ins.db, ins.Cnb);
+
+    // 5. 状态同步与约束
+    // 因为 Feedback 修改了 qnb，必须同步更新欧拉角 att，否则 GetAttDeg() 会拿旧数据
+    ins.attsyn();
+    
+    // [工程经验] 静态对准期间，强制锁定位置和高度
+    // 防止因加速度计零偏未收敛导致的位置发散，进而导致地球参数(g, wie)计算错误
+    ins.pos = res_init.pos; 
+    ins.vn(2) = 0.0; // 高程通道阻尼
 }
 
+void SinsEngine::Finish_Fine() {
+    res_fine.valid = true;
+    
+    // 直接从 INS 引擎中提取最终状态
+    // 因为是全闭环，ins.eb/db 已经是收敛后的最终零偏
+    res_fine.att = ins.att;
+    res_fine.vel = ins.vn;
+    res_fine.pos = ins.pos;
+    res_fine.eb  = ins.eb; 
+    res_fine.db  = ins.db;
+    
+    cout << "[Fine] Done. Bias Gyro: " << (res_fine.eb * glv.rad * 3600).transpose() << " deg/h" << endl;
+    cout << "[Fine] Done. Bias Acc:  " << (res_fine.db / glv.ug).transpose() << " ug" << endl;
+}
+
+// --- 导航 (保持不变) ---
+void SinsEngine::Run_Nav_Phase(const std::vector<IMUData>& data_chunk) {
+    if (data_chunk.empty()) return;
+
+    AlignResult* best = &res_init;
+    if (res_fine.valid) {
+        best = &res_fine;
+        cout << "[Nav] Using FINE alignment result (" << best->align_time << "s)." << endl;
+    }
+    else if (res_coarse.valid) {
+        best = &res_coarse;
+        cout << "[Nav] Using COARSE alignment result (" << best->align_time << "s)." << endl;
+    }
+    else {
+        cout << "[Nav] Using INITIAL default values (No alignment performed)." << endl;
+    }
+
+    eth.update(best->pos, best->vel);
+    ins = INSState(best->att, best->vel, best->pos, ins.ts, eth);
+    ins.set_bias(best->eb, best->db);
+
+    for (const auto& d : data_chunk) {
+        Step_Nav(d.wm, d.vm);
+    }
+    cout << "[Nav] Finished processing " << data_chunk.size() << " epochs." << endl;
+}
+
+void SinsEngine::Step_Nav(const Vector3d& wm, const Vector3d& vm) {
+    ins.update(wm, vm, glv, eth);
+    ins.vn(2) = 0.0; 
+    ins.pos(2) = res_init.pos(2);
+}
+
+// Getters 
+Vector3d SinsEngine::GetAttDeg() const { return ins.att * glv.rad; }
+Vector3d SinsEngine::GetVel() const { return ins.vn; }
 Vector3d SinsEngine::GetPosDeg() const {
-    Vector3d p;
-    if (state == EngineState::FINE_ALIGNING) p = align_pos;
-    else if (state == EngineState::NAVIGATING) p = ins.pos;
-    else p = align_cfg.pos_ref; 
-
+    Vector3d p = ins.pos;
     p(0) *= glv.rad; p(1) *= glv.rad;
     return p;
 }
-
-Vector3d SinsEngine::GetBiasGyro() const {
-    // 返回总零偏
-    if (state == EngineState::FINE_ALIGNING) return accum_bias_gyro + align_kf.xk.segment<3>(6);
-    if (state == EngineState::NAVIGATING) return ins.eb;
-    return Vector3d::Zero();
-}
-
-Vector3d SinsEngine::GetBiasAcc() const {
-    if (state == EngineState::FINE_ALIGNING) return accum_bias_acc + align_kf.xk.segment<3>(9);
-    if (state == EngineState::NAVIGATING) return ins.db;
-    return Vector3d::Zero();
-}
-
-void SinsEngine::InjectBias(const Vector3d& db_gyro, const Vector3d& db_acc) {
-    if (state == EngineState::NAVIGATING) {
-        ins.set_bias(ins.eb + db_gyro, ins.db + db_acc);
-    }
-}
-
-Quaterniond SinsEngine::GetQnb() const {
-    if (state == EngineState::FINE_ALIGNING) return align_qnb;
-    if (state == EngineState::NAVIGATING) return ins.qnb;
-    return Quaterniond::Identity(); 
-}
+Vector3d SinsEngine::GetBiasGyro() const { return ins.eb * glv.rad * 3600.0; }
+Vector3d SinsEngine::GetBiasAcc() const { return ins.db / glv.ug; }
+Quaterniond SinsEngine::GetQnb() const { return ins.qnb; }

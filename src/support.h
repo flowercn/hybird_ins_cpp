@@ -13,12 +13,31 @@
 using namespace std;
 using namespace Eigen;
 
-// --- [原有功能] 数据加载 ---
-std::vector<IMUData> load_and_process_data(const std::string& filename, double ts, double target_g) {
+struct SimulationData {
+    // 粗对准数据包
+    std::vector<IMUData> data_coarse;
+    double time_coarse; // 秒
+
+    // 精对准数据包
+    std::vector<IMUData> data_fine;
+    double time_fine;   // 秒
+
+    // 导航数据包 (通常是全量数据)
+    std::vector<IMUData> data_nav;
+    double time_nav;    // 秒
+};
+
+SimulationData LoadAndSplitData(const std::string& filename, double ts, double target_g, 
+                                double req_t_coarse, double req_t_fine) 
+{
+    SimulationData sim_data;
     std::vector<Vector3d> raw_gyro, raw_acc;
+    
+    // 1. 读取 CSV 文件 复制前六列到raw_gyro和raw_acc
     std::ifstream file(filename);
     std::string line;
-    if (!file.is_open()) { cerr << "Error: Cannot open " << filename << endl; return {}; }
+    if (!file.is_open()) { cerr << "Error: Cannot open " << filename << endl; return sim_data; }
+    
     while (std::getline(file, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
         if (line.empty()) continue;
@@ -27,17 +46,22 @@ std::vector<IMUData> load_and_process_data(const std::string& filename, double t
         std::vector<double> vals;
         try {
             while (std::getline(ss, cell, ',')) {
+                // 去除可能存在的 Windows 回车符
                 cell.erase(std::remove(cell.begin(), cell.end(), '\r'), cell.end()); 
                 if (!cell.empty()) vals.push_back(std::stod(cell));
             }
         } catch (...) { continue; } 
+        
+        // 兼容 6列(纯IMU) 或 7列(带时间) 格式，取前6列
         if (vals.size() >= 6) {
             raw_gyro.push_back(Vector3d(vals[0], vals[1], vals[2]));
             raw_acc.push_back(Vector3d(vals[3], vals[4], vals[5]));
         }
     }
-    if (raw_gyro.empty()) return {};
 
+    if (raw_gyro.empty()) return sim_data;
+
+    // 2. 加速度计归一化 (Auto-Scaling)
     Vector3d acc_sum = Vector3d::Zero();
     for (const auto& a : raw_acc) acc_sum += a;
     Vector3d acc_mean_raw = acc_sum / raw_acc.size();
@@ -45,20 +69,44 @@ std::vector<IMUData> load_and_process_data(const std::string& filename, double t
     double norm_meas = acc_mean_raw.norm();
     double scale_ratio = (norm_meas > 1e-5) ? target_g / norm_meas : 1.0; 
     
-    std::vector<IMUData> data;
+    // 3. 构建全量 IMUData (用于 Nav)
+    std::vector<IMUData>& all_data = sim_data.data_nav;
     double t_curr = 0.0;
     for (size_t i = 0; i < raw_gyro.size(); ++i) {
         IMUData d;
         d.wm = raw_gyro[i] * ts;          
         d.vm = (raw_acc[i] * scale_ratio) * ts; 
         d.t = t_curr;
-        data.push_back(d);
+        all_data.push_back(d);
         t_curr += ts;
     }
-    return data;
+    sim_data.time_nav = t_curr;
+
+    // 4. 数据切片 (Slicing) - 修正版
+    // 策略：粗对准用前 T1 秒，精对准用前 T2 秒 (包含 T1，KF通常需要从头收敛)，导航用 T2 之后的数据
+    
+    size_t n_coarse = static_cast<size_t>(req_t_coarse / ts);
+    if (n_coarse > all_data.size()) n_coarse = all_data.size();
+    sim_data.data_coarse.assign(all_data.begin(), all_data.begin() + n_coarse);
+    sim_data.time_coarse = n_coarse * ts;
+
+    size_t n_fine = static_cast<size_t>(req_t_fine / ts); // 精对准通常包含粗对准段时间
+    if (n_fine > all_data.size()) n_fine = all_data.size();
+    sim_data.data_fine.assign(all_data.begin(), all_data.begin() + n_fine);
+    sim_data.time_fine = n_fine * ts;
+    
+    // 导航数据：从精对准结束那一刻开始，直到文件结束
+    if (n_fine < all_data.size()) {
+        sim_data.data_nav.assign(all_data.begin() + n_fine, all_data.end());
+        sim_data.time_nav = sim_data.data_nav.size() * ts;
+    } else {
+        sim_data.data_nav.clear();
+        sim_data.time_nav = 0;
+    }
+
+    return sim_data;
 }
 
-// --- [原有功能] 坐标转换 ---
 Vector3d LocalToGeo(const Vector3d& xyz_enu, const Vector3d& pos_ref_rad, const GLV& glv) {
     double lat = pos_ref_rad(0); double h = pos_ref_rad(2);
     double sl = sin(lat); double cl = cos(lat); 
@@ -66,36 +114,6 @@ Vector3d LocalToGeo(const Vector3d& xyz_enu, const Vector3d& pos_ref_rad, const 
     double sq = sqrt(1.0 - e2 * sl * sl);
     double RN = Re / sq; double RM = RN * (1.0 - e2) / (1.0 - e2 * sl * sl); 
     return Vector3d(lat + xyz_enu(1)/(RM+h), pos_ref_rad(1) + xyz_enu(0)/((RN+h)*cl), h + xyz_enu(2));
-}
-
-// --- [新增功能] 惯导引擎一键初始化 ---
-// 将 main 函数中繁琐的配置代码封装在此
-SinsEngine CreateConfiguredSins(double ts, const GLV& glv, double t_coarse, double t_fine) {
-    AlignConfig align_cfg;
-    
-    // 姿态参考 (Attitude Reference)
-    align_cfg.att_ref << -0.03258, 0.20927, 0.62977; 
-    align_cfg.att_ref *= glv.deg;  
-    
-    // 位置参考 (Position Reference)
-    align_cfg.pos_ref << 32.0286 * glv.deg, 118.8533 * glv.deg, 17.0; 
-    
-    // 初始误差设置 (Initial Errors)
-    align_cfg.phi_init_err << 0.01, 0.01, 0.1;
-    align_cfg.phi_init_err *= glv.deg; 
-    align_cfg.wvn_err << 0.001, 0.001, 0.001;
-    
-    // IMU 噪声参数 (Sensor Noise)
-    align_cfg.eb_sigma = 0.2 * glv.dph;          
-    align_cfg.db_sigma = 100 * glv.ug;           
-    align_cfg.web_psd  = 0.021 * glv.dpsh;       
-    align_cfg.wdb_psd  = 10 * glv.ugpsHz;
-
-    // 实例化并初始化引擎
-    SinsEngine sins(ts);
-    sins.Init(align_cfg, t_coarse, t_fine);
-    
-    return sins; // 返回初始化好的对象
 }
 
 #endif // SUPPORT_H
