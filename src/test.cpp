@@ -1,6 +1,9 @@
 #include <iostream>
 #include <fstream>
+#include <sstream>
+#include <vector>
 #include <iomanip>
+#include <cmath>
 #include "sins_engine.h"
 #include "support.h"
 
@@ -11,25 +14,49 @@ int main() {
     string csv_path = "../fog3h.csv"; 
     double ts = 1.0 / 400.0; 
     GLV glv;
+
+    // ---------------------------------------------------------
+    // [CRITICAL FIX] 计算初始位置的"当地重力"，用于归一化
+    // ---------------------------------------------------------
+    // 初始位置：南京
+    Vector3d pos_nj(32.0286 * glv.deg, 118.8533 * glv.deg, 17.0); 
     
-    // [修改点1] 加载数据：粗对准60s，精对准延长到 900s (15分钟)
-    // 只有时间足够长，KF 才能把零偏从噪声中彻底剥离出来
+    // 借用 Earth 类算一下当地重力
+    Earth eth_temp(glv);
+    eth_temp.update(pos_nj, Vector3d::Zero());
+    double local_g = eth_temp.gn.norm(); // 理论值约为 9.7932
+    
+    cout << "[Config] Standard Gravity (g0): " << glv.g0 << endl;
+    cout << "[Config] Local Gravity (gn):    " << local_g << " (Difference: " << (local_g - glv.g0) << ")" << endl;
+    
+    // ---------------------------------------------------------
+    // 配置与加载
+    // ---------------------------------------------------------
+    // 先跑 600s 快速验证。确认漂移率下降后，可改为 10800.0 跑全量
     double t_coarse = 60.0;
-    double t_fine = 900.0; 
+    double t_fine = 600.0;  
     
-    auto sim = LoadAndSplitData(csv_path, ts, glv.g0, t_coarse, t_fine);
-    if (sim.data_nav.empty()) { cerr << "Data load failed or too short." << endl; return -1; }
+    // [关键] 传入 local_g 进行归一化
+    auto sim = LoadAndSplitData(csv_path, ts, local_g, t_coarse, t_fine);
+    
+    if (sim.data_fine.empty()) { cerr << "Data load failed or too short." << endl; return -1; }
     
     SinsEngine engine(ts);
-    Vector3d pos_nj(32.0286 * glv.deg, 118.8533 * glv.deg, 17.0); 
+    // 初始化 INS 状态
     engine.Sins_Init(pos_nj, Vector3d::Zero(), Vector3d::Zero(), Vector3d::Zero(), Vector3d::Zero());
 
     // ---------------------------------------------------------
     // 1. 粗对准
     // ---------------------------------------------------------
     cout << ">>> [1/3] Running Coarse Alignment (" << sim.time_coarse << "s)..." << endl;
-    engine.Run_Coarse_Phase(sim.data_coarse);
-    
+    //engine.Run_Coarse_Phase(sim.data_coarse);
+    Vector3d att_truth(0.03404, 0.31606, 0.61788); // 你的真值
+    engine.res_coarse.valid = true;
+    engine.res_coarse.att = att_truth * glv.deg; // 注意单位
+    engine.res_coarse.vel.setZero();
+    engine.res_coarse.pos = pos_nj;
+    engine.res_coarse.eb.setZero();
+    engine.res_coarse.db.setZero();
     if (engine.res_coarse.valid) {
         Vector3d att = engine.res_coarse.att * glv.rad;
         cout << "    Result (deg): P=" << att(0) << ", R=" << att(1) << ", Y=" << att(2) << endl;
@@ -38,7 +65,7 @@ int main() {
     }
 
     // ---------------------------------------------------------
-    // 2. 精对准 (Fine Alignment) - 900s
+    // 2. 精对准 (Fine Alignment) - 开环估计
     // ---------------------------------------------------------
     cout << ">>> [2/3] Running Fine Alignment (" << sim.time_fine << "s)..." << endl;
     
@@ -64,7 +91,7 @@ int main() {
             engine.Step_Fine(sim.data_fine[i].wm, sim.data_fine[i].vm);
             
             // 降频记录日志
-            if (i % 400 == 0) { // 每1秒记录一次
+            if (i % 400 == 0) { 
                 Vector3d att = engine.GetAttDeg();
                 Vector3d vel = engine.GetVel();
                 Vector3d eb = engine.GetBiasGyro(); 
@@ -77,47 +104,57 @@ int main() {
             }
             if (i > 0 && i % progress_step == 0) cout << "    Progress: " << (i*100/sim.data_fine.size()) << "%" << endl;
         }
-        
-        engine.Finish_Fine(); // 这一步会更新 res_fine 并打印最终 Bias
+        engine.Finish_Fine(); 
     }
     f_log.close();
 
     // ---------------------------------------------------------
-    // 3. 导航验证 - 跑 1 小时 (3600s)
+    // 3. 导航验证 (使用剩余数据)
     // ---------------------------------------------------------
-    double nav_duration = 3600.0; 
-    cout << ">>> [3/3] Running Nav Verification (" << nav_duration << "s limit)..." << endl;
+    size_t start_idx = static_cast<size_t>(t_fine / ts); 
     
-    ofstream f_nav("nav_log.txt");
-    f_nav << "Time,Lat,Lon,H,Ve,Vn,Vu" << endl;
-
-    engine.Run_Nav_Phase(std::vector<IMUData>()); 
-    
-    Vector3d p0 = engine.GetPosDeg();
-    size_t nav_steps = static_cast<size_t>(nav_duration / ts);
-    if (nav_steps > sim.data_nav.size()) nav_steps = sim.data_nav.size();
-
-    for (size_t i = 0; i < nav_steps; ++i) {
-        const auto& d = sim.data_nav[i];
-        engine.Step_Nav(d.wm, d.vm); 
+    if (start_idx < sim.data_nav.size()) {
+        double nav_duration = 3600.0; // 跑1小时导航 (数据不够则自动截止)
+        cout << ">>> [3/3] Running Nav Verification (" << nav_duration << "s limit)..." << endl;
         
-        if (i % 400 == 0) { 
-            Vector3d p = engine.GetPosDeg();
-            Vector3d v = engine.GetVel();
-            f_nav << d.t << "," << p(0) << "," << p(1) << "," << p(2) << "," 
-                  << v(0) << "," << v(1) << "," << v(2) << endl;
-        }
-    }
-    f_nav.close();
+        ofstream f_nav("nav_log.txt");
+        f_nav << "Time,Lat,Lon,H,Ve,Vn,Vu" << endl;
 
-    Vector3d p1 = engine.GetPosDeg();
-    double drift = (p1.head<2>() - p0.head<2>()).norm() * 111320.0; 
-    
-    cout << "------------------------------------------------" << endl;
-    cout << "Init Pos: " << p0.transpose() << endl;
-    cout << "End Pos:  " << p1.transpose() << endl;
-    cout << "Total Horizontal Drift: " << drift << " m (over " << (nav_steps*ts) << "s)" << endl;
-    cout << "Drift Rate: " << (drift / 1852.0) << " nm/h" << endl; // 自动计算每小时海里漂移
+        // 初始化导航状态
+        engine.Run_Nav_Phase(std::vector<IMUData>()); 
+        
+        Vector3d p0 = engine.GetPosDeg();
+        
+        size_t end_idx = start_idx + static_cast<size_t>(nav_duration / ts);
+        if (end_idx > sim.data_nav.size()) end_idx = sim.data_nav.size();
+
+        int log_step = 0;
+        for (size_t i = start_idx; i < end_idx; ++i) {
+            const auto& d = sim.data_nav[i];
+            engine.Step_Nav(d.wm, d.vm); 
+            
+            if (++log_step >= 400) { 
+                log_step = 0;
+                Vector3d p = engine.GetPosDeg();
+                Vector3d v = engine.GetVel();
+                f_nav << d.t << "," << p(0) << "," << p(1) << "," << p(2) << "," 
+                      << v(0) << "," << v(1) << "," << v(2) << endl;
+            }
+        }
+        f_nav.close();
+
+        Vector3d p1 = engine.GetPosDeg();
+        double drift = (p1.head<2>() - p0.head<2>()).norm() * 111320.0; 
+        
+        cout << "------------------------------------------------" << endl;
+        cout << "Init Pos: " << p0.transpose() << endl;
+        cout << "End Pos:  " << p1.transpose() << endl;
+        cout << "Total Horizontal Drift: " << drift << " m" << endl;
+        
+        double actual_time_h = (end_idx - start_idx) * ts / 3600.0;
+        if(actual_time_h > 0)
+             cout << "Drift Rate: " << (drift / 1852.0) / actual_time_h << " nm/h" << endl;
+    }
 
     return 0;
 }

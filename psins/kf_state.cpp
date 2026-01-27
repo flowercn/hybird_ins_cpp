@@ -21,8 +21,8 @@ void KFAlignVN::Init(double nts, const GLV& glv,
     
     Qk.diagonal().segment<3>(0) = web2 * nts;
     Qk.diagonal().segment<3>(3) = wdb2 * nts; // 速度随机游走
-    Qk.diagonal().segment<3>(6) = Vector3d::Zero(); // 零偏通常建模为随机常数(0噪声)或一阶马尔可夫
-    Qk.diagonal().segment<3>(9) = Vector3d::Zero(); 
+    Qk.diagonal().segment<3>(6).setZero(); // Gyro Bias Q = 0
+    Qk.diagonal().segment<3>(9).setZero(); // Acc Bias Q = 0                    
     
     // --- Rk (测量噪声) ---
     Rk = Matrix3d::Identity() * (wvn_err * wvn_err) / nts;
@@ -104,16 +104,4 @@ void KFAlignVN::Feedback(Quaterniond& qnb, Vector3d& vn, Vector3d& eb, Vector3d&
     vn -= vn_fb;
     xk.segment<3>(3) *= remain;
 
-    // 3. [Fix] 零偏反馈
-    // 陀螺零偏 (eb): 对应 Phikk_1 中的 -Cnb，暗示 x_eb = (b_hat - b_true)
-    // 所以我们需要减去估计出的误差
-    Vector3d eb_fb = xk.segment<3>(6) * fb_ratio;
-    eb -= eb_fb; 
-    xk.segment<3>(6) *= remain;
-
-    // 加计零偏 (db): 对应 Phikk_1 中的 +Cnb，暗示 x_db = (b_true - b_hat)
-    // 所以我们需要加上估计出的误差
-    Vector3d db_fb = xk.segment<3>(9) * fb_ratio;
-    db += db_fb;
-    xk.segment<3>(9) *= remain;
 }

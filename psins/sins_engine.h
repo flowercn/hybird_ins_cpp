@@ -27,18 +27,13 @@ struct AlignResult {
 
 struct KFConfig {
     Eigen::Vector3d phi_init_err = {0.1*M_PI/180, 0.1*M_PI/180, 1.0*M_PI/180}; 
-    Eigen::Vector3d wvn_err      = {0.01, 0.01, 0.01};          
-    // P0: 初始陀螺零偏不确定度 (对应"逐次启动重复性"，通常比Allan谷底大2个数量级，给 0.5 deg/h 以便快速收敛)
-    double eb_sigma = 0.5 * M_PI/180 / 3600.0;              
-    
-    // P0: 初始加计零偏不确定度 (1000ug，给大一点让它敢于估计)
-    double db_sigma = 1000.0 * 1e-6 * 9.78;
+    Eigen::Vector3d wvn_err      = {0.001, 0.001, 0.001};         
 
+    double eb_sigma = 0.2 * M_PI/180 / 3600.0;             
+    double db_sigma = 100.0 * 1e-6 * 9.78;      // 100 ug
     // Qk: 角速度随机游走 (ARW, 对应Allan图 tau=1 处的值)
-    double web_psd  = 0.1 * M_PI/180 / 60.0;               
-    
-    // Qk: 速度随机游走 (VRW, 对应加计白噪声)
-    double wdb_psd  = 100.0 * 1e-6 * 9.78;
+    double web_psd  = 0.02 * M_PI/180 / 60.0;              
+    double wdb_psd  = 10.0 * 1e-6 * 9.78;       // 10 ug/sqrt(Hz)
 };
 
 class SinsEngine {

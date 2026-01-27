@@ -187,11 +187,15 @@ void SinsEngine::Finish_Fine() {
     res_fine.att = ins.att;
     res_fine.vel = ins.vn;
     res_fine.pos = ins.pos;
-    res_fine.eb  = ins.eb; 
-    res_fine.db  = ins.db;
+    res_fine.eb = res_init.eb + kf.xk.segment<3>(6);
+    res_fine.db = res_init.db + kf.xk.segment<3>(9);
     
     cout << "[Fine] Done. Bias Gyro: " << (res_fine.eb * glv.rad * 3600).transpose() << " deg/h" << endl;
     cout << "[Fine] Done. Bias Acc:  " << (res_fine.db / glv.ug).transpose() << " ug" << endl;
+    Vector3d att_deg = res_fine.att * glv.rad;
+    cout << "[Fine] Done. Att (deg):  P=" << att_deg(0) 
+         << ", R=" << att_deg(1) 
+         << ", Y=" << att_deg(2) << endl;
 }
 
 // --- 导航 (保持不变) ---
