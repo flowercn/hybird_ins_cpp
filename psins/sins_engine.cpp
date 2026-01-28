@@ -190,9 +190,9 @@ void SinsEngine::Finish_Fine() {
     res_fine.eb = res_init.eb + kf.xk.segment<3>(6);
     res_fine.db = res_init.db + kf.xk.segment<3>(9);
     
-    cout << "[Fine] Done. Bias Gyro: " << (res_fine.eb * glv.rad * 3600).transpose() << " deg/h" << endl;
+    cout << "[Fine] Done. Bias Gyro: " << (res_fine.eb / glv.deg * 3600).transpose() << " deg/h" << endl;
     cout << "[Fine] Done. Bias Acc:  " << (res_fine.db / glv.ug).transpose() << " ug" << endl;
-    Vector3d att_deg = res_fine.att * glv.rad;
+    Vector3d att_deg = res_fine.att / glv.deg;
     cout << "[Fine] Done. Att (deg):  P=" << att_deg(0) 
          << ", R=" << att_deg(1) 
          << ", Y=" << att_deg(2) << endl;
@@ -232,13 +232,178 @@ void SinsEngine::Step_Nav(const Vector3d& wm, const Vector3d& vm) {
 }
 
 // Getters 
-Vector3d SinsEngine::GetAttDeg() const { return ins.att * glv.rad; }
+Vector3d SinsEngine::GetAttDeg() const { return ins.att / glv.deg; }
 Vector3d SinsEngine::GetVel() const { return ins.vn; }
 Vector3d SinsEngine::GetPosDeg() const {
     Vector3d p = ins.pos;
-    p(0) *= glv.rad; p(1) *= glv.rad;
+    p(0) /= glv.deg; p(1) /= glv.deg;
     return p;
 }
-Vector3d SinsEngine::GetBiasGyro() const { return ins.eb * glv.rad * 3600.0; }
+Vector3d SinsEngine::GetBiasGyro() const { return ins.eb / glv.deg * 3600.0; }
 Vector3d SinsEngine::GetBiasAcc() const { return ins.db / glv.ug; }
 Quaterniond SinsEngine::GetQnb() const { return ins.qnb; }
+
+// ========== 混合对准实现 ==========
+
+Vector3d SinsEngine::ComputeGeometricEB(const Vector3d& att,
+                                         const std::vector<IMUData>& data,
+                                         double eb_sigma_allan_dph) {
+    if (data.empty()) return Vector3d::Zero();
+    
+    // 计算陀螺均值 (rad/s)
+    Vector3d gyro_sum = Vector3d::Zero();
+    for (const auto& d : data) {
+        gyro_sum += d.wm / ins.ts;
+    }
+    Vector3d gyro_mean = gyro_sum / data.size();
+    
+    // 地球自转在 n 系的投影
+    double lat = res_init.pos(0);
+    Vector3d wie_n(0, glv.wie * cos(lat), glv.wie * sin(lat));
+    
+    // 姿态矩阵 Cnb (n->b)
+    Matrix3d Cnb = INSMath::a2mat(att);
+    
+    // 地球自转在 b 系的投影
+    Vector3d wie_b = Cnb.transpose() * wie_n;
+    
+    // 原始零偏 = 测量均值 - 期望值
+    Vector3d eb_raw = gyro_mean - wie_b;
+    
+    // 几何均值缩放
+    double sigma_b = eb_sigma_allan_dph * glv.deg / 3600.0;  // rad/s
+    Vector3d eb_geo;
+    for (int i = 0; i < 3; ++i) {
+        double scale = (abs(eb_raw(i)) > 1e-15) ? 
+                       min(1.0, sqrt(sigma_b / abs(eb_raw(i)))) : 1.0;
+        eb_geo(i) = scale * eb_raw(i);
+    }
+    
+    return eb_geo;
+}
+
+HybridAlignResult SinsEngine::Run_HybridAlign(const std::vector<IMUData>& data,
+                                               const HybridAlignConfig& cfg) {
+    HybridAlignResult result;
+    result.valid = false;
+    
+    if (data.empty()) {
+        if (cfg.verbose) cout << "[HybridAlign] Error: No data provided." << endl;
+        return result;
+    }
+    
+    double total_time = data.size() * ins.ts;
+    if (cfg.verbose) {
+        cout << "\n========== Hybrid Alignment ==========" << endl;
+        cout << "  Total data: " << total_time << " s" << endl;
+        cout << "  Coarse:     " << cfg.t_coarse << " s" << endl;
+        cout << "  Fine:       " << cfg.t_fine << " s" << endl;
+    }
+    
+    // 数据切片
+    size_t n_coarse = min(static_cast<size_t>(cfg.t_coarse / ins.ts), data.size());
+    size_t n_fine = min(static_cast<size_t>(cfg.t_fine / ins.ts), data.size());
+    
+    vector<IMUData> data_coarse(data.begin(), data.begin() + n_coarse);
+    vector<IMUData> data_fine(data.begin(), data.begin() + n_fine);
+    
+    // ========== Step 1: 粗对准 ==========
+    if (cfg.verbose) cout << "\n[1/3] Coarse Alignment..." << endl;
+    
+    Run_Coarse_Phase(data_coarse);
+    
+    if (!res_coarse.valid) {
+        if (cfg.verbose) cout << "  Failed!" << endl;
+        return result;
+    }
+    
+    result.att_coarse = res_coarse.att;
+    if (cfg.verbose) {
+        Vector3d att_deg = res_coarse.att / glv.deg;
+        cout << "  Attitude (deg): [" << att_deg(0) << ", " << att_deg(1) << ", " << att_deg(2) << "]" << endl;
+    }
+    
+    // ========== Step 2: KF 精对准 (只取姿态) ==========
+    if (cfg.verbose) cout << "\n[2/3] KF Fine Alignment (attitude only)..." << endl;
+    
+    // 从粗对准结果开始
+    eth.update(res_coarse.pos, res_coarse.vel);
+    ins = INSState(res_coarse.att, res_coarse.vel, res_coarse.pos, ins.ts, eth);
+    ins.set_bias(Vector3d::Zero(), Vector3d::Zero());
+    
+    kf.Init(ins.ts, glv, kf_cfg.phi_init_err(0), kf_cfg.web_psd, kf_cfg.wdb_psd,
+            kf_cfg.eb_sigma, kf_cfg.db_sigma, kf_cfg.wvn_err(0));
+    
+    // 运行 KF
+    size_t progress_step = data_fine.size() / 10;
+    for (size_t i = 0; i < data_fine.size(); ++i) {
+        Step_Fine(data_fine[i].wm, data_fine[i].vm);
+        if (cfg.verbose && progress_step > 0 && i > 0 && i % progress_step == 0) {
+            cout << "  Progress: " << (i * 100 / data_fine.size()) << "%" << endl;
+        }
+    }
+    
+    result.att_kf = ins.att;
+    if (cfg.verbose) {
+        Vector3d att_deg = ins.att / glv.deg;
+        cout << "  KF Attitude (deg): [" << att_deg(0) << ", " << att_deg(1) << ", " << att_deg(2) << "]" << endl;
+    }
+    
+    // ========== Step 3: 几何均值零偏估计 ==========
+    if (cfg.verbose) cout << "\n[3/3] Geometric Mean Bias Estimation..." << endl;
+    
+    // 计算原始零偏
+    double lat = res_init.pos(0);
+    Vector3d wie_n(0, glv.wie * cos(lat), glv.wie * sin(lat));
+    Matrix3d Cnb = INSMath::a2mat(ins.att);
+    Vector3d wie_b = Cnb.transpose() * wie_n;
+    
+    Vector3d gyro_sum = Vector3d::Zero();
+    for (const auto& d : data_fine) {
+        gyro_sum += d.wm / ins.ts;
+    }
+    Vector3d gyro_mean = gyro_sum / data_fine.size();
+    Vector3d eb_raw = gyro_mean - wie_b;
+    
+    // 几何均值缩放
+    double sigma_b = cfg.eb_sigma_allan * glv.deg / 3600.0;
+    Vector3d scale;
+    for (int i = 0; i < 3; ++i) {
+        scale(i) = (abs(eb_raw(i)) > 1e-15) ? min(1.0, sqrt(sigma_b / abs(eb_raw(i)))) : 1.0;
+    }
+    Vector3d eb_geo = scale.asDiagonal() * eb_raw;
+    
+    result.eb_raw = eb_raw;
+    result.eb_scale = scale;
+    
+    if (cfg.verbose) {
+        cout << "  Raw eb (deg/h):  [" << (eb_raw / glv.deg * 3600).transpose() << "]" << endl;
+        cout << "  Scale factors:   [" << scale.transpose() << "]" << endl;
+        cout << "  Final eb (deg/h):[" << (eb_geo / glv.deg * 3600).transpose() << "]" << endl;
+    }
+    
+    // ========== 填充结果 ==========
+    result.valid = true;
+    result.att = ins.att;
+    result.eb = eb_geo;
+    result.db = Vector3d::Zero();  // 加计零偏暂不估计
+    result.align_time = cfg.t_coarse + cfg.t_fine;
+    
+    // 更新 INS 状态
+    ins.set_bias(eb_geo, Vector3d::Zero());
+    
+    // 保存到 res_fine
+    res_fine.valid = true;
+    res_fine.att = result.att;
+    res_fine.vel = Vector3d::Zero();
+    res_fine.pos = res_init.pos;
+    res_fine.eb = result.eb;
+    res_fine.db = result.db;
+    res_fine.align_time = result.align_time;
+    
+    if (cfg.verbose) {
+        cout << "\n========== Alignment Complete ==========" << endl;
+    }
+    
+    return result;
+}

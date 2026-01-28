@@ -104,4 +104,13 @@ void KFAlignVN::Feedback(Quaterniond& qnb, Vector3d& vn, Vector3d& eb, Vector3d&
     vn -= vn_fb;
     xk.segment<3>(3) *= remain;
 
+    // 3. 陀螺零偏反馈 [新增]
+    Vector3d eb_fb = xk.segment<3>(6) * fb_ratio;
+    eb += eb_fb;  // 注意符号：eb_est 是误差，需要加到当前 eb 上
+    xk.segment<3>(6) *= remain;
+    
+    // 4. 加计零偏反馈 [新增]
+    Vector3d db_fb = xk.segment<3>(9) * fb_ratio;
+    db += db_fb;
+    xk.segment<3>(9) *= remain;
 }

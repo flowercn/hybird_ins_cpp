@@ -36,6 +36,29 @@ struct KFConfig {
     double wdb_psd  = 10.0 * 1e-6 * 9.78;       // 10 ug/sqrt(Hz)
 };
 
+// 混合对准配置
+struct HybridAlignConfig {
+    double t_coarse = 60.0;         // 粗对准时长 (s)
+    double t_fine = 3600.0;         // 精对准时长 (s) 
+    double eb_sigma_allan = 0.003;  // Allan 零偏稳定性 (deg/h)
+    bool verbose = true;            // 是否输出过程信息
+};
+
+// 混合对准结果
+struct HybridAlignResult {
+    bool valid = false;
+    Eigen::Vector3d att;     // 最终姿态 (rad)
+    Eigen::Vector3d eb;      // 几何均值零偏 (rad/s)
+    Eigen::Vector3d db;      // 加计零偏
+    double align_time;       // 对准总时长
+    
+    // 中间结果 (调试用)
+    Eigen::Vector3d att_coarse;  // 粗对准姿态
+    Eigen::Vector3d att_kf;      // KF 精对准姿态
+    Eigen::Vector3d eb_raw;      // 原始计算零偏
+    Eigen::Vector3d eb_scale;    // 缩放因子
+};
+
 class SinsEngine {
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -88,6 +111,15 @@ public:
     void Finish_Coarse();
     void Finish_Fine();    
 
+    // ========== 混合对准接口 (推荐使用) ==========
+    // 一键执行：粗对准 + KF精对准(姿态) + 几何均值(零偏)
+    HybridAlignResult Run_HybridAlign(const std::vector<IMUData>& data, 
+                                       const HybridAlignConfig& cfg = HybridAlignConfig());
+    
+    // 计算几何均值零偏 (给定姿态)
+    Eigen::Vector3d ComputeGeometricEB(const Eigen::Vector3d& att,
+                                        const std::vector<IMUData>& data,
+                                        double eb_sigma_allan_dph = 0.003);
 };
 
 #endif // SINS_ENGINE_H

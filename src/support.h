@@ -107,6 +107,61 @@ SimulationData LoadAndSplitData(const std::string& filename, double ts, double t
     return sim_data;
 }
 
+// ========== 简化加载接口 ==========
+// 只加载原始 IMU 数据，不做切片（用于 HybridAlign 自动切片）
+inline std::vector<IMUData> LoadIMUData(const std::string& filename, double ts, double target_g) {
+    std::vector<IMUData> data;
+    std::vector<Vector3d> raw_gyro, raw_acc;
+    
+    std::ifstream file(filename);
+    if (!file.is_open()) { 
+        cerr << "Error: Cannot open " << filename << endl; 
+        return data; 
+    }
+    
+    std::string line;
+    while (std::getline(file, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+        
+        std::stringstream ss(line);
+        std::string cell;
+        std::vector<double> vals;
+        try {
+            while (std::getline(ss, cell, ',')) {
+                cell.erase(std::remove(cell.begin(), cell.end(), '\r'), cell.end()); 
+                if (!cell.empty()) vals.push_back(std::stod(cell));
+            }
+        } catch (...) { continue; }
+        
+        if (vals.size() >= 6) {
+            raw_gyro.push_back(Vector3d(vals[0], vals[1], vals[2]));
+            raw_acc.push_back(Vector3d(vals[3], vals[4], vals[5]));
+        }
+    }
+    
+    if (raw_gyro.empty()) return data;
+    
+    // 加速度计归一化
+    Vector3d acc_sum = Vector3d::Zero();
+    for (const auto& a : raw_acc) acc_sum += a;
+    double norm_meas = (acc_sum / raw_acc.size()).norm();
+    double scale = (norm_meas > 1e-5) ? target_g / norm_meas : 1.0;
+    
+    // 构建数据
+    double t = 0;
+    for (size_t i = 0; i < raw_gyro.size(); ++i) {
+        IMUData d;
+        d.wm = raw_gyro[i] * ts;
+        d.vm = raw_acc[i] * scale * ts;
+        d.t = t;
+        data.push_back(d);
+        t += ts;
+    }
+    
+    return data;
+}
+
 Vector3d LocalToGeo(const Vector3d& xyz_enu, const Vector3d& pos_ref_rad, const GLV& glv) {
     double lat = pos_ref_rad(0); double h = pos_ref_rad(2);
     double sl = sin(lat); double cl = cos(lat); 

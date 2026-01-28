@@ -10,7 +10,7 @@ using namespace Eigen;
 
 class GLV {
 public:
-    double deg, rad, sec, min, hour, ppm;
+    double deg, sec, min, hour, ppm;
     double dph, dpsh, arcmin, arcsec;
     double Re, wie, f, e2, ge, g0;
     double m, beta, beta1;
@@ -19,7 +19,6 @@ public:
     GLV() {
         ts = 1.0 / 400.0;
         deg = M_PI / 180.0;
-        rad = 180.0 / M_PI;
         sec = 1.0;
         min = 60.0;
         hour = 3600.0;
