@@ -350,7 +350,7 @@ HybridAlignResult SinsEngine::Run_HybridAlign(const std::vector<IMUData>& data,
     }
     
     // ========== Step 3: 几何均值零偏估计 ==========
-    if (cfg.verbose) cout << "\n[3/3] Geometric Mean Bias Estimation..." << endl;
+    if (cfg.verbose) cout << "\n[3/3] Geometric Mean Bias Estimation(Gyro & Acc)..." << endl;
     
     // 计算原始零偏
     double lat = res_init.pos(0);
