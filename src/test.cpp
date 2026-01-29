@@ -15,6 +15,7 @@
 
 #include <iostream>
 #include <iomanip>
+#include <fstream>
 #include "sins_engine.h"
 #include "support.h"
 
@@ -66,12 +67,17 @@ int main() {
     ins.ins = INSState(result.att, Vector3d::Zero(), pos, ts, ins.eth);
     ins.ins.set_bias(result.eb, result.db);
     
+    // 打开日志文件
+    ofstream log_file("nav_log.csv");
+    log_file << "time_s,lat_deg,lon_deg,alt_m,pitch_deg,roll_deg,yaw_deg,drift_m\n";
+    
     // 导航
     size_t nav_start = static_cast<size_t>(cfg.t_fine / ts);
     double max_drift = 0;
     
     cout << "    Time(min)  Drift(m)" << endl;
     int step = (imu_data.size() - nav_start) / 10;
+    int log_step = static_cast<int>(1.0 / ts);  // 每秒记录一次
     
     for (size_t i = nav_start; i < imu_data.size(); ++i) {
         ins.Step_Nav(imu_data[i].wm, imu_data[i].vm);
@@ -81,11 +87,29 @@ int main() {
         double drift = sqrt(dN*dN + dE*dE);
         if (drift > max_drift) max_drift = drift;
         
+        // 保存日志 (每秒)
+        if ((i - nav_start) % log_step == 0) {
+            double t = (i - nav_start) * ts;
+            Vector3d att = INSMath::m2att(ins.ins.Cnb);
+            log_file << fixed << setprecision(6)
+                     << t << ","
+                     << ins.ins.pos(0) / glv.deg << ","
+                     << ins.ins.pos(1) / glv.deg << ","
+                     << ins.ins.pos(2) << ","
+                     << att(0) / glv.deg << ","
+                     << att(1) / glv.deg << ","
+                     << att(2) / glv.deg << ","
+                     << drift << "\n";
+        }
+        
         if (step > 0 && (i - nav_start) % step == 0 && i > nav_start) {
             cout << fixed << setw(12) << setprecision(1) << ((i - nav_start) * ts / 60)
                  << setw(10) << drift << endl;
         }
     }
+    
+    log_file.close();
+    cout << "    Log saved to: nav_log.csv" << endl;
     
     // ========== 结果 ==========
     double nav_time = (imu_data.size() - nav_start) * ts;

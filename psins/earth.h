@@ -18,6 +18,7 @@ public:
     Vector3d wien; // 地球自转角速度 (n系)
     Vector3d wenn; // 运输率 (n系)
     Vector3d winn; // wien + wenn
+    Vector3d wcor; // 2*wien + wenn
     Vector3d gn;   // 当地重力向量
     Vector3d gcc;  // 哥氏/向心加速度 (有害加速度)
 

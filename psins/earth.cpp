@@ -29,7 +29,7 @@ void Earth::update(const Vector3d& pos, const Vector3d& vn) {
 
     gn << 0.0, 0.0, -gL;
     
-    Vector3d wcor = 2.0 * wien + wenn;
+    wcor = 2.0 * wien + wenn;
     gcc = -wcor.cross(vn) + gn;
 
     // 存储中间变量
