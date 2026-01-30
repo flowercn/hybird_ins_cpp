@@ -20,6 +20,8 @@ public:
     Vector3d an;       // 导航系加速度 (m/s^2)
     Vector3d eb;       // 陀螺零偏 (rad/s)
     Vector3d db;       // 加计零偏 (m/s^2)
+    Vector3d Kg;       // 陀螺刻度误差
+    Vector3d Ka;       // 加计刻度误差
     
     Matrix3d Cnb;      
     Matrix3d Mpv;      
@@ -27,6 +29,9 @@ public:
 
     Vector3d wm_last;
     Vector3d vm_last;
+
+    //Vector3d debug_vm_raw;  // 原始速度增量
+    //Vector3d debug_vm_pure; // 修正后的速度增量
 
     Vector3d vn0, pos0;
     Matrix3d Cnb0;
@@ -37,6 +42,7 @@ public:
     INSState(const Vector3d& att0, const Vector3d& vn0, const Vector3d& pos0, double ts, const Earth& eth);
     // --- core ---
     void set_bias(const Vector3d& new_eb, const Vector3d& new_db);
+    void set_scalefactor(const Vector3d& new_kg, const Vector3d& new_ka);
     void update(const Vector3d& wm, const Vector3d& vm, const GLV& glv, Earth& eth);
     void attsyn();
 private:

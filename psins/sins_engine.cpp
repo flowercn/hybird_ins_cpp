@@ -15,7 +15,9 @@ void SinsEngine::Sins_Init(const Vector3d& init_pos,
                            const Vector3d& init_vel, 
                            const Vector3d& init_att, 
                            const Vector3d& init_eb, 
-                           const Vector3d& init_db) {
+                           const Vector3d& init_db,
+                           const Vector3d& init_kg, 
+                           const Vector3d& init_ka) {
     // 1. 刷新地球模型
     eth = Earth(glv);
     eth.update(init_pos, init_vel);
@@ -29,6 +31,8 @@ void SinsEngine::Sins_Init(const Vector3d& init_pos,
     res_init.att = init_att;
     res_init.eb  = init_eb;
     res_init.db  = init_db;
+    res_init.kg  = init_kg;
+    res_init.ka  = init_ka;
 
     // 3. 重置
     res_coarse.valid = false;
@@ -349,13 +353,19 @@ HybridAlignResult SinsEngine::Run_HybridAlign(const std::vector<IMUData>& data,
         cout << "  KF Attitude (deg): [" << att_deg(0) << ", " << att_deg(1) << ", " << att_deg(2) << "]" << endl;
     }
     
-    // ========== Step 3: 几何均值零偏估计 ==========
-    if (cfg.verbose) cout << "\n[3/3] Geometric Mean Bias Estimation(Gyro & Acc)..." << endl;
+    // ========== Step 3: 几何均值零偏估计 (Gyro & Acc) ==========
+    if (cfg.verbose) cout << "\n[3/3] Geometric Mean Bias Estimation..." << endl;
     
-    // 计算原始零偏
+    // ---------------------------------------------------------
+    // A. 准备公共变量
+    // ---------------------------------------------------------
     double lat = res_init.pos(0);
+    Matrix3d Cnb = INSMath::a2mat(ins.att); // 使用精对准算出的最佳姿态
+    
+    // ---------------------------------------------------------
+    // B. 估计陀螺零偏 (Gyro Bias) - 原有逻辑
+    // ---------------------------------------------------------
     Vector3d wie_n(0, glv.wie * cos(lat), glv.wie * sin(lat));
-    Matrix3d Cnb = INSMath::a2mat(ins.att);
     Vector3d wie_b = Cnb.transpose() * wie_n;
     
     Vector3d gyro_sum = Vector3d::Zero();
@@ -365,32 +375,77 @@ HybridAlignResult SinsEngine::Run_HybridAlign(const std::vector<IMUData>& data,
     Vector3d gyro_mean = gyro_sum / data_fine.size();
     Vector3d eb_raw = gyro_mean - wie_b;
     
-    // 几何均值缩放
-    double sigma_b = cfg.eb_sigma_allan * glv.deg / 3600.0;
-    Vector3d scale;
+    // 陀螺缩放
+    double sigma_eb = cfg.eb_sigma_allan * glv.deg / 3600.0;
+    Vector3d scale_eb;
     for (int i = 0; i < 3; ++i) {
-        scale(i) = (abs(eb_raw(i)) > 1e-15) ? min(1.0, sqrt(sigma_b / abs(eb_raw(i)))) : 1.0;
+        scale_eb(i) = (abs(eb_raw(i)) > 1e-15) ? min(1.0, sqrt(sigma_eb / abs(eb_raw(i)))) : 1.0;
     }
-    Vector3d eb_geo = scale.asDiagonal() * eb_raw;
+    Vector3d eb_geo = scale_eb.asDiagonal() * eb_raw;
     
+    // ---------------------------------------------------------
+    // C. [新增] 估计加计零偏 (Acc Bias) - 核心补丁
+    // ---------------------------------------------------------
+    // 1. 计算理论重力在 b 系的投影 (理想比力)
+    //    原理: f_ideal = -C_n^b * g_n
+    Vector3d gn = eth.gn; // 获取当地重力矢量 (ENU下通常是 [0, 0, -g])
+    Vector3d fb_ref = Cnb.transpose() * (-gn); 
+
+    // 2. 计算测量均值
+    Vector3d acc_sum = Vector3d::Zero();
+    for (const auto& d : data_fine) {
+        acc_sum += d.vm / ins.ts; // 累积比力 (m/s^2)
+    }
+    Vector3d acc_mean = acc_sum / data_fine.size();
+
+    // 3. 计算原始残差 (Raw Bias)
+    //    db = Measured - Ideal
+    Vector3d db_raw = acc_mean - fb_ref;
+
+    // 4. 加计缩放 (几何均值约束)
+    //    防止因为姿态极其不准导致算出巨大的虚假零偏
+    //    假设 cfg 中有 db_sigma_allan (单位 ug)，如果没有请手动填一个值比如 100.0
+    double sigma_db = (cfg.db_sigma_allan > 0 ? cfg.db_sigma_allan : 100.0) * glv.ug; // ug -> m/s^2
+    
+    Vector3d scale_db;
+    for (int i = 0; i < 3; ++i) {
+        // 如果误差太大(超过sigma的平方关系)，说明可能是姿态错，缩小权重；如果误差小，直接信任。
+        scale_db(i) = (abs(db_raw(i)) > 1e-15) ? min(1.0, sqrt(sigma_db / abs(db_raw(i)))) : 1.0;
+    }
+    Vector3d db_geo = scale_db.asDiagonal() * db_raw;
+    db_geo(0) = 0.0; // 强制 X 轴零偏为 0 (信任 KF 的 Roll)
+    db_geo(1) = 0.0; // 强制 Y 轴零偏为 0 (信任 KF 的 Pitch)
+    // ---------------------------------------------------------
+    // D. 保存结果与日志
+    // ---------------------------------------------------------
     result.eb_raw = eb_raw;
-    result.eb_scale = scale;
+    result.eb_scale = scale_eb;
+    
+    // [新增] 保存加计结果
+    result.db_raw = db_raw; // 确保 Result 结构体里有这个字段，没有就存 db
     
     if (cfg.verbose) {
-        cout << "  Raw eb (deg/h):  [" << (eb_raw / glv.deg * 3600).transpose() << "]" << endl;
-        cout << "  Scale factors:   [" << scale.transpose() << "]" << endl;
-        cout << "  Final eb (deg/h):[" << (eb_geo / glv.deg * 3600).transpose() << "]" << endl;
+        cout << " [Gyro] Raw eb (deg/h): [" << (eb_raw / glv.deg * 3600).transpose() << "]" << endl;
+        cout << "        Final eb      : [" << (eb_geo / glv.deg * 3600).transpose() << "]" << endl;
+        
+        // [新增] 打印加计日志
+        cout << " [Acc ] Raw db (ug)   : [" << (db_raw / glv.ug).transpose() << "]" << endl;
+        cout << "        Scale factors : [" << scale_db.transpose() << "]" << endl;
+        cout << "        Final db (ug) : [" << (db_geo / glv.ug).transpose() << "]" << endl;
     }
     
-    // ========== 填充结果 ==========
+    // ========== 填充最终结果 ==========
     result.valid = true;
     result.att = ins.att;
     result.eb = eb_geo;
-    result.db = Vector3d::Zero();  // 加计零偏暂不估计
+    
+    // [修改] 这里不再是 Zero，而是算出来的 db_geo
+    result.db = db_geo;  
+    
     result.align_time = cfg.t_coarse + cfg.t_fine;
     
-    // 更新 INS 状态
-    ins.set_bias(eb_geo, Vector3d::Zero());
+    // 更新 INS 状态 (同时注入 eb 和 db)
+    ins.set_bias(result.eb, result.db);
     
     // 保存到 res_fine
     res_fine.valid = true;
@@ -398,7 +453,7 @@ HybridAlignResult SinsEngine::Run_HybridAlign(const std::vector<IMUData>& data,
     res_fine.vel = Vector3d::Zero();
     res_fine.pos = res_init.pos;
     res_fine.eb = result.eb;
-    res_fine.db = result.db;
+    res_fine.db = result.db; // [修改] 保存 db
     res_fine.align_time = result.align_time;
     
     if (cfg.verbose) {

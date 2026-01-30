@@ -23,6 +23,8 @@ struct AlignResult {
     Eigen::Vector3d pos;         // 位置
     Eigen::Vector3d eb;          // 陀螺零偏
     Eigen::Vector3d db;          // 加计零偏
+    Eigen::Vector3d kg;          // 陀螺刻度误差
+    Eigen::Vector3d ka;          // 加计刻度误差
 };
 
 struct KFConfig {
@@ -36,27 +38,40 @@ struct KFConfig {
     double wdb_psd  = 10.0 * 1e-6 * 9.78;       // 10 ug/sqrt(Hz)
 };
 
-// 混合对准配置
-struct HybridAlignConfig {
-    double t_coarse = 60.0;         // 粗对准时长 (s)
-    double t_fine = 3600.0;         // 精对准时长 (s) 
-    double eb_sigma_allan = 0.003;  // Allan 零偏稳定性 (deg/h)
-    bool verbose = true;            // 是否输出过程信息
-};
-
 // 混合对准结果
 struct HybridAlignResult {
     bool valid = false;
     Eigen::Vector3d att;     // 最终姿态 (rad)
-    Eigen::Vector3d eb;      // 几何均值零偏 (rad/s)
-    Eigen::Vector3d db;      // 加计零偏
+    Eigen::Vector3d eb;      // 最终几何均值陀螺零偏 (rad/s)
+    Eigen::Vector3d db;      // 最终几何均值加计零偏 (m/s^2) [NEW: 现在这里会存入有效值]
     double align_time;       // 对准总时长
     
-    // 中间结果 (调试用)
+    // --- 中间结果 (用于调试/日志打印) ---
     Eigen::Vector3d att_coarse;  // 粗对准姿态
-    Eigen::Vector3d att_kf;      // KF 精对准姿态
-    Eigen::Vector3d eb_raw;      // 原始计算零偏
-    Eigen::Vector3d eb_scale;    // 缩放因子
+    Eigen::Vector3d att_kf;      // KF 精对准结束时的姿态
+    
+    // 陀螺中间变量
+    Eigen::Vector3d eb_raw;      // 原始测量残差 (rad/s)
+    Eigen::Vector3d eb_scale;    // 陀螺几何约束缩放因子 (0.0 ~ 1.0)
+    
+    // [NEW] 加计中间变量 (对应代码中的 db_raw 和 scale_db)
+    Eigen::Vector3d db_raw;      // 原始加计测量残差 (m/s^2)
+    Eigen::Vector3d db_scale;    // 加计几何约束缩放因子 (0.0 ~ 1.0)
+};
+
+// 混合对准配置
+struct HybridAlignConfig {
+    double t_coarse = 60.0;         // 粗对准时长 (s)
+    double t_fine = 3600.0;         // 精对准时长 (s) 
+    
+    // 零偏稳定性约束 (用于几何均值滤波)
+    double eb_sigma_allan = 0.003;  // 陀螺 Allan 零偏稳定性 (deg/h)
+    
+    // [NEW] 加计稳定性约束
+    // 建议设为 50.0 ~ 100.0 ug (基于您的 Allan 方差图底噪为 1ug，这就足够抓住 57ug 的误差了)
+    double db_sigma_allan = 50.0;   // 加计 Allan 零偏稳定性 (ug)
+    
+    bool verbose = true;            // 是否输出过程信息
 };
 
 class SinsEngine {
@@ -91,7 +106,9 @@ public:
                    const Eigen::Vector3d& init_vel, // [Ve, Vn, Vu]
                    const Eigen::Vector3d& init_att, // [Pitch, Roll, Yaw]
                    const Eigen::Vector3d& init_eb,  // [Gx, Gy, Gz]
-                   const Eigen::Vector3d& init_db); // [Ax, Ay, Az]
+                   const Eigen::Vector3d& init_db,
+                   const Eigen::Vector3d& init_kg, 
+                   const Eigen::Vector3d& init_ka);
     void SetKFConfig(const KFConfig& cfg);
 
     void Run_Coarse_Phase(const std::vector<IMUData>& data_chunk);

@@ -21,6 +21,8 @@ INSState::INSState(const Vector3d& att0, const Vector3d& vn0, const Vector3d& po
     this->eb.setZero(); 
     this->db.setZero();
     this->an.setZero();
+    this->Kg.setZero();
+    this->Ka.setZero();
 
     // 初始化 Mpv (位置更新矩阵)
     this->Mpv.setZero();
@@ -37,6 +39,11 @@ INSState::INSState(const Vector3d& att0, const Vector3d& vn0, const Vector3d& po
 void INSState::set_bias(const Vector3d& new_eb, const Vector3d& new_db) {
     this->eb = new_eb;
     this->db = new_db;
+}
+
+void INSState::set_scalefactor(const Vector3d& new_kg, const Vector3d& new_ka) {
+    this->Kg = new_kg;
+    this->Ka = new_ka;
 }
 
 // 圆锥划船补偿
@@ -57,10 +64,19 @@ void INSState::cnscl(const Vector3d& wm, const Vector3d& vm, Vector3d& phim, Vec
 void INSState::update(const Vector3d& wm, const Vector3d& vm, const GLV& glv, Earth& eth) {
     double nts2 = ts / 2.0;
 
-    // 1. 扣除零偏
-    Vector3d wm_pure = wm - eb * ts;
-    Vector3d vm_pure = vm - db * ts;
+    //this->debug_vm_raw = vm;
 
+    //static int debug_cnt = 0;
+    // 1. 扣除零偏 (Bias Correction)
+    Vector3d wm_unbiased = wm - eb * ts;
+    Vector3d vm_unbiased = vm - db * ts;
+
+    /// 2. 扣除刻度因数误差 (Scale Factor Correction)
+    // 推荐写法：转为 array() 进行逐元素运算，然后再转回 matrix()
+    Vector3d wm_pure = wm_unbiased.array() / (Vector3d::Ones() + Kg).array();
+    Vector3d vm_pure = vm_unbiased.array() / (Vector3d::Ones() + Ka).array();
+
+    //this->debug_vm_pure = vm_pure;
     // 2. 补偿 (计算圆锥/划船效应)
     Vector3d phim, dvbm;
     cnscl(wm_pure, vm_pure, phim, dvbm);
