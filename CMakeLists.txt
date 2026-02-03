@@ -40,7 +40,7 @@ target_link_libraries(psins Eigen3::Eigen)
 # --- 4. 编译目标 ---
 
 # [目标 A] 主测试程序
-add_executable(test src/test.cpp  src/support.h)
+add_executable(test src/test.cpp  src/cai_sim.cpp src/support.h)
 target_link_libraries(test psins)
 
 # [目标 B] 主程序 (包含暴力搜索)

@@ -71,7 +71,9 @@ Vector3d AtomicGyroSimulator::Measure() {
         std::cerr << "[CAI] Warning: Not initialized, returning zero" << std::endl;
         return Vector3d::Zero();
     }
-    return wie_b_ + bias_vec_;
+    Vector3d noise(noise_dist_(rng_), noise_dist_(rng_), noise_dist_(rng_));
+    Vector3d rate_noise = noise * (angle_noise_rad_ / params_.T_cycle);
+    return wie_b_ + bias_vec_ + rate_noise;
 }
 
 Vector3d AtomicGyroSimulator::Measure(const Matrix3d& Cnb) {
