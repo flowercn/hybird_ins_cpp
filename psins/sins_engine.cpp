@@ -22,7 +22,12 @@ void SinsEngine::Sins_Init(const Vector3d& init_pos,
     eth = Earth(glv);
     eth.update(init_pos, init_vel);
 
-    // 2. 填充初始结果
+    // 2. 初始化 INS 核心解算状态！
+    // 必须用传入的初始值重新构造 ins 对象，确保 qnb, Cnb, pos 等全部正确
+    ins = INSState(init_att, init_vel, init_pos, ins.ts, eth);
+    ins.set_bias(init_eb, init_db);
+
+    // 3. 填充初始结果 (存档用)
     res_init.valid = true;
     res_init.align_time = 0.0;
     
@@ -34,7 +39,7 @@ void SinsEngine::Sins_Init(const Vector3d& init_pos,
     res_init.kg  = init_kg;
     res_init.ka  = init_ka;
 
-    // 3. 重置
+    // 4. 重置
     res_coarse.valid = false;
     res_fine.valid = false;
     

@@ -25,9 +25,11 @@ namespace cai {
 // 原子陀螺物理参数
 struct CAIParams {
     double T_cycle = 2.0;           // 干涉周期 (s)
-    double arw_dpsh = 2.0e-4;       // ARW (deg/√h)
+    double arw_dpsh = 2.0e-5;       // ARW (deg/√h)
     double bias_dph = 1.0e-5;       // 零偏不稳定性 (deg/h)
-    int seed = 42;                  // 随机种子
+    double bias_ug = 0.05;   // 零偏稳定性 (50ng = 0.05ug)
+    double vrw_ug = 10.0;    // 速度随机游走/白噪声 (ug)
+    int seed = 123;          // 随机种子
 };
 
 /**
@@ -93,6 +95,42 @@ private:
     
     bool initialized_ = false;
 };
+
+/**
+ * @brief 原子加速度计仿真器
+ * * 物理模型：
+ * - 测量比力 (Specific Force)
+ * - 使用对准锁定的姿态计算理想参考比力 fb_ref = Cnb^T * (-g^n)
+ * - 误差模型：Bias (ug) + White Noise (ug)
+ */
+class AtomicAccSimulator {
+public:
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+    // 构造函数
+    AtomicAccSimulator(const Eigen::Vector3d& pos_rad, const GLV& glv, 
+                       const CAIParams& params = CAIParams());
+
+    // 初始化：传入对准锁定的姿态 (Attitude Locked)
+    // 这一步非常关键：它计算出所谓的“完美比力”，用于抵消 FOG 加计的零偏
+    void Init(const Eigen::Vector3d& att_locked);
+
+    // 获取测量值 (m/s^2)
+    Eigen::Vector3d Measure();
+
+private:
+    CAIParams params_;
+    GLV glv_;
+    Eigen::Vector3d fn_ref_;     // n系参考比力 (指向天向)
+    Eigen::Vector3d fb_ref_;     // b系参考比力 (初始化后固定)
+    Eigen::Vector3d bias_vec_;   // 仿真零偏
+    
+    std::mt19937 rng_;
+    std::normal_distribution<double> noise_dist_;
+    
+    bool initialized_ = false;
+};
+
 
 } // namespace cai
 

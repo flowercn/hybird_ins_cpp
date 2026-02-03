@@ -1,4 +1,5 @@
 #include "cai_sim.h"
+#include "earth.h"
 #include <iostream>
 #include <cmath>
 
@@ -22,13 +23,32 @@ AtomicGyroSimulator::AtomicGyroSimulator(const Vector3d& pos_rad, const GLV& glv
     angle_noise_rad_ = angle_noise_deg * glv_.deg;
     
     // 计算零偏 (deg/h -> rad/s)
-    double bias_rad_s = (params_.bias_dph * glv_.deg) / 3600.0;
+    double bias_rad_s = params_.bias_dph * glv_.dph;
     bias_vec_ = Vector3d(bias_rad_s, bias_rad_s, bias_rad_s);
+}
+
+AtomicAccSimulator::AtomicAccSimulator(const Vector3d& pos_rad, const GLV& glv,
+                                       const CAIParams& params)
+    : params_(params), glv_(glv), rng_(params.seed + 1), noise_dist_(0.0, 1.0) // seed+1 避免与陀螺噪声序列完全一样
+{
+    Earth eth(glv);
+    eth.update(pos_rad, Vector3d::Zero());
+    fn_ref_ = -eth.gn; 
 }
 
 void AtomicGyroSimulator::Init(const Vector3d& att_rad) {
     Matrix3d Cnb = INSMath::a2mat(att_rad);
     Init(Cnb);
+}
+
+void AtomicAccSimulator::Init(const Vector3d& att) {
+    Matrix3d Cnb = INSMath::a2mat(att);
+    fb_ref_ = Cnb.transpose() * fn_ref_;
+    
+    double bias_mps2 = params_.bias_ug * glv_.ug;
+    bias_vec_ = Vector3d(bias_mps2, bias_mps2, bias_mps2);
+    
+    initialized_ = true;
 }
 
 void AtomicGyroSimulator::Init(const Matrix3d& Cnb) {
@@ -63,6 +83,14 @@ Vector3d AtomicGyroSimulator::Measure(const Quaterniond& qnb) {
     Matrix3d Cnb = INSMath::q2mat(qnb);
     return Measure(Cnb);
 }
+
+Vector3d AtomicAccSimulator::Measure() {
+    if (!initialized_) return Vector3d::Zero();
+    double noise_std = params_.vrw_ug * glv_.ug;
+    Vector3d noise(noise_dist_(rng_), noise_dist_(rng_), noise_dist_(rng_));
+    return fb_ref_ + bias_vec_ + noise* noise_std;
+}
+
 
 Vector3d AtomicGyroSimulator::GetAngleNoise() {
     return Vector3d(noise_dist_(rng_), noise_dist_(rng_), noise_dist_(rng_)) * angle_noise_rad_;

@@ -4,12 +4,16 @@ project(HybridINS)
 # --- 0. 基础设置 ---
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_BUILD_TYPE Release)
+# 如果你要调试看变量，这里改成 Debug；如果要跑暴力搜索求速度，一定要用 Release！
+set(CMAKE_BUILD_TYPE Release) 
 
 # --- 1. 寻找依赖库 ---
 find_package(Eigen3 REQUIRED)
 find_package(GTSAM REQUIRED)
 find_package(Boost REQUIRED)
+
+# [新增] 查找 OpenMP 支持
+find_package(OpenMP REQUIRED)
 
 # --- 2. 全局头文件路径配置 ---
 include_directories(
@@ -39,5 +43,13 @@ target_link_libraries(psins Eigen3::Eigen)
 add_executable(test src/test.cpp  src/support.h)
 target_link_libraries(test psins)
 
+# [目标 B] 主程序 (包含暴力搜索)
 add_executable(main src/main.cpp src/cai_sim.cpp src/support.h)
-target_link_libraries(main psins)
+
+# [修改] 链接 OpenMP::OpenMP_CXX 以开启多线程支持
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(main psins OpenMP::OpenMP_CXX)
+else()
+    # 如果没找到 OpenMP，就只链接 psins (单线程跑)
+    target_link_libraries(main psins)
+endif()
