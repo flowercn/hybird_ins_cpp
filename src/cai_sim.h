@@ -25,10 +25,10 @@ namespace cai {
 // 原子陀螺物理参数
 struct CAIParams {
     double T_cycle = 2.0;           // 干涉周期 (s)
-    double arw_dpsh = 2.0e-5;       // ARW (deg/√h)
+    double arw_dpsh = 0.0e-5;       // ARW (deg/√h)
     double bias_dph = 1.0e-5;       // 零偏不稳定性 (deg/h)
     double bias_ug = 0.05;   // 零偏稳定性 (50ng = 0.05ug)
-    double vrw_ug = 10.0;    // 速度随机游走/白噪声 (ug)
+    double vrw_ug = 0.5;    // 速度随机游走/白噪声 (ug)
     int seed = 123;          // 随机种子
 };
 

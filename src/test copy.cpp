@@ -5,7 +5,7 @@
 #include <string>
 #include "sins_engine.h"
 #include "cai_sim.h"
-#include "support.h" 
+#include "support.h" // 包含 ExpConfig 等基础定义
 
 using namespace std;
 using namespace Eigen;
@@ -14,7 +14,7 @@ using namespace cai;
 // 定义死区时间实验配置
 struct DeadTimeConfig {
     string name;        // 实验组名称
-    double t_active;    // 原子陀螺/加计有效工作时间
+    double t_active;    // 原子陀螺有效工作时间
     double t_dead;      // 盲区时间
     string filename;    // 输出文件名
 };
@@ -27,6 +27,7 @@ int main() {
     Earth eth(glv); 
     eth.update(pos_ref, Vector3d::Zero());
     double local_g = eth.gn.norm(); 
+
 
     std::vector<std::string> file_list = {
         "../fog_part1.csv", "../fog_part2.csv", "../fog_part3.csv", 
@@ -69,16 +70,16 @@ int main() {
     vector<IMUData>().swap(buffer_align);
     
     // =========================================================
-    // Phase 3: 死区时间对比实验 (含原子加计 + 修正后残差统计)
+    // Phase 3: 6组死区时间对比实验 (手动回溯版 + 盲区残差记录)
     // =========================================================
 
     vector<DeadTimeConfig> experiments = {
         {"Group_2.0s_Full", 2.0,      0.0,      "nav_dead_2.0s.csv"}, 
-        // {"Group_1.8s",      1.8,      0.2,      "nav_dead_1.8s.csv"},
+        //{"Group_1.8s",      1.8,      0.2,      "nav_dead_1.8s.csv"},
         {"Group_1.6s",      1.6,      0.4,      "nav_dead_1.6s.csv"}, 
-        // {"Group_1.4s",      1.4,      0.6,      "nav_dead_1.4s.csv"},
+       // {"Group_1.4s",      1.4,      0.6,      "nav_dead_1.4s.csv"},
         {"Group_1.2s",      1.2,      0.8,      "nav_dead_1.2s.csv"},
-        // {"Group_1.0s",      1.0,      1.0,      "nav_dead_1.0s.csv"}  
+        //{"Group_1.0s",      1.0,      1.0,      "nav_dead_1.0s.csv"}  
     };
 
     std::vector<std::string> rest_files(file_list.begin() + 1, file_list.end());
@@ -90,33 +91,26 @@ int main() {
         cout << " Config: Active=" << exp.t_active << "s, Dead=" << exp.t_dead << "s -> " << exp.filename << endl;
         cout << "--------------------------------------------------" << endl;
 
-        // 1. 初始化原子陀螺
+        // 1. 初始化传感器
         AtomicGyroSimulator atom(pos_ref, glv);
         atom.Init(align_res.att); 
         
-        // 2. 初始化原子加计
-        CAIParams acc_params;
-        acc_params.bias_ug = 0.0; 
-        acc_params.vrw_ug  = 0.05; 
-        AtomicAccSimulator atom_acc(pos_ref, glv, acc_params);
-        atom_acc.Init(align_res.att); // 锁定重力参考
-        
-        // 3. 初始化惯导引擎
+        // 2. 初始化惯导引擎
         SinsEngine sinsegine(ts);
         sinsegine.eth = Earth(glv);
         sinsegine.eth.update(pos_ref, Vector3d::Zero());
         sinsegine.ins = INSState(align_res.att, Vector3d::Zero(), pos_ref, ts, sinsegine.eth);
         sinsegine.ins.set_bias(align_res.eb, align_res.db);
 
-        // 4. 日志配置 (增加 res_acc)
+        // 3. 日志配置
         IMUChainedLoader nav_loader(rest_files, ts, local_g);
         ofstream log(exp.filename);
+        // [修改] 增加残差列 res_int_x, res_int_y, res_int_z
         log << "time,lat_err,lon_err,h_err,drift,vn,ve,vu,roll,pitch,yaw,"
             << "eb_x,eb_y,eb_z,db_x,db_y,db_z,"
-            << "res_gyro_x,res_gyro_y,res_gyro_z,"
-            << "res_acc_x,res_acc_y,res_acc_z\n"; 
+            << "res_int_x,res_int_y,res_int_z\n"; 
 
-        // 5. 周期参数
+        // 4. 周期参数
         double T_cycle = 2.0; 
         int total_samples_per_cycle = static_cast<int>(T_cycle / ts); 
         int active_samples = static_cast<int>(exp.t_active / ts);     
@@ -124,14 +118,10 @@ int main() {
         std::vector<IMUData> chunk_buffer;
         chunk_buffer.reserve(total_samples_per_cycle + 10);
         
-        // 累积器
         Vector3d fog_gyro_active_sum = Vector3d::Zero(); 
-        Vector3d fog_acc_active_sum  = Vector3d::Zero(); 
         
-        // 残差中间量 (Sum of Raw - Ref)
-        Vector3d gyro_dead_raw_sum = Vector3d::Zero(); 
-        Vector3d acc_dead_raw_sum  = Vector3d::Zero(); 
-        int dead_count = 0; // 记录死区样本数
+        // 【核心变量】盲区残差累加器 (Sum of Raw - Earth)
+        Vector3d dead_residual_sum = Vector3d::Zero(); 
         
         int sample_count = 0;
         double max_drift = 0;
@@ -143,55 +133,35 @@ int main() {
             chunk_buffer.push_back(epoch);
             sample_count++;
 
-            // B. 区分 Active / Dead
+            // B. 有条件累加
             if (sample_count <= active_samples) {
-                // [Active] 累积 FOG 数据用于估计 Bias
+                // 有效期：累加 FOG 用于估算 Bias
                 fog_gyro_active_sum += epoch.wm / ts; 
-                fog_acc_active_sum  += epoch.vm / ts; 
             } else {
-                // [Dead] 累积原始残差 (Raw - Ref)
-                // 此时还不知道本周期的 Bias，所以先只减去理论参考值
+                // 【核心修改】盲区：计算残差 (光纤原始输出 - 地球自转分量)
                 
-                // 1. 陀螺参考：地球自转在 b 系投影
+                // 1. 计算当前时刻(近似)的地球自转在载体系的分量
+                //    使用周期起始时的姿态 Cnb 进行投影
                 Vector3d earth_inc_body = sinsegine.ins.Cnb.transpose() * sinsegine.eth.wien * ts;
-                gyro_dead_raw_sum += (epoch.wm - earth_inc_body);
-
-                // 2. 加计参考：重力在 b 系投影 (注意 gn 通常是 [0,0,-g], 测量比力是 -g)
-                //    理想比力 fb = Cnb^T * (-gn)
-                Vector3d force_inc_body = sinsegine.ins.Cnb.transpose() * (-sinsegine.eth.gn) * ts;
-                acc_dead_raw_sum += (epoch.vm - force_inc_body);
-
-                dead_count++;
+                
+                // 2. 累加残差 (Res = Wm - Earth)
+                //    这里剩下的就是：Bias * dt + Noise
+                dead_residual_sum += (epoch.wm - earth_inc_body);
             }
 
-            // D. 周期结束 -> 计算 Bias、修正残差、回溯
+            // D. 周期结束 -> 计算与回溯
             if (sample_count >= total_samples_per_cycle) {
                 
-                // 1. [Active区] 估算 Bias
+                // 1. 估算 Active 区 Bias
                 Vector3d fog_gyro_mean = Vector3d::Zero();
-                Vector3d fog_acc_mean  = Vector3d::Zero();
-                if (active_samples > 0) {
-                    fog_gyro_mean = fog_gyro_active_sum / active_samples;
-                    fog_acc_mean  = fog_acc_active_sum  / active_samples;
-                }
-
+                if (active_samples > 0) fog_gyro_mean = fog_gyro_active_sum / active_samples;
                 Vector3d atom_gyro_meas = atom.Measure(); 
-                Vector3d atom_acc_meas  = atom_acc.Measure(); 
-
                 Vector3d eb_obs = fog_gyro_mean - atom_gyro_meas;
-                Vector3d db_obs = fog_acc_mean  - atom_acc_meas;
-
-                // 反馈增益滤波
                 Vector3d eb_new = sinsegine.ins.eb * (1.0 - gain) + eb_obs * gain;
-                Vector3d db_new = sinsegine.ins.db * (1.0 - gain) + db_obs * gain;
-                
-                sinsegine.ins.set_bias(eb_new, db_new);
+                sinsegine.ins.set_bias(eb_new, sinsegine.ins.db); 
 
-                // 2. [Dead区] 计算最终残差 (Residual = RawSum - RefSum - Bias*Time)
-                //    这就是光纤器件纯随机游走积分
-                double t_dead_real = dead_count * ts;
-                Vector3d final_gyro_res = gyro_dead_raw_sum - eb_new * t_dead_real;
-                Vector3d final_acc_res  = acc_dead_raw_sum  - db_new * t_dead_real;
+                // 2. 锁定本周期的盲区残差，用于后续写入日志
+                Vector3d current_res_int = dead_residual_sum;
 
                 // 3. [回溯] 全周期重算
                 for (size_t i = 0; i < chunk_buffer.size(); ++i) {
@@ -213,9 +183,8 @@ int main() {
                             << sinsegine.ins.att(0)/glv.deg << "," << sinsegine.ins.att(1)/glv.deg << "," << sinsegine.ins.att(2)/glv.deg << ","
                             << sinsegine.ins.eb(0)/glv.deg*3600 << "," << sinsegine.ins.eb(1)/glv.deg*3600 << "," << sinsegine.ins.eb(2)/glv.deg*3600 << ","
                             << sinsegine.ins.db(0)/glv.ug << "," << sinsegine.ins.db(1)/glv.ug << "," << sinsegine.ins.db(2)/glv.ug << ","
-                            // 输出修正后的纯随机游走残差
-                            << final_gyro_res(0) << "," << final_gyro_res(1) << "," << final_gyro_res(2) << ","
-                            << final_acc_res(0)  << "," << final_acc_res(1)  << "," << final_acc_res(2) << "\n";
+                            // 输出盲区残差 (rad)
+                            << current_res_int(0) << "," << current_res_int(1) << "," << current_res_int(2) << "\n";
                         
                         if (total_steps > 0 && total_steps % (3600 * 400) == 0 && i == chunk_buffer.size()-1) {
                              cout << "   Time: " << nav_time / 3600.0 << " h | Drift: " << drift 
@@ -226,9 +195,8 @@ int main() {
                 }
 
                 // 清空状态
-                fog_gyro_active_sum.setZero(); fog_acc_active_sum.setZero();
-                gyro_dead_raw_sum.setZero();   acc_dead_raw_sum.setZero();
-                dead_count = 0;
+                fog_gyro_active_sum.setZero();
+                dead_residual_sum.setZero(); // 重置残差累加器
                 sample_count = 0; 
                 chunk_buffer.clear();
             }
