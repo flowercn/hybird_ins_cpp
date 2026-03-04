@@ -7,6 +7,7 @@
 #include <string>
 #include <sstream>
 #include <algorithm>
+#include <iomanip>
 #include <Eigen/Dense>
 #include "../psins/sins_engine.h"  
 #include "cai_sim.h"
@@ -15,34 +16,31 @@ using namespace std;
 using namespace Eigen;
 using namespace cai;
 
-struct ExpConfig {
-    string name;        // 实验名称
-    double vrw_ug;      // 原子加计白噪声
-    double bias_ug;     // 原子加计常值零偏
-    double gain;        // 反馈增益
-    string filename;    // 输出文件名
+// 实验配置参数
+struct ExperimentConfig {
+    string name;        // 实验名
+    double t_active;    // 有效时间
+    double t_dead;      // 死区时间
+    bool use_atomic_acc;// 是否使用原子加计
+    string output_file; // 输出文件名
 };
 
-    // // =========================================================
-    // // Phase 0: 纯原子导航基准测试
-    // // =========================================================
-    // {
-    //     Vector3d att_true = Vector3d(0.0436479, 0.332121, 0.553816) * glv.deg;
-    //     AtomicGyroSimulator atom_pure_g(pos_ref, glv);
-    //     atom_pure_g.Init(att_true);
+// 共享的上下文环境 (避免重复传参)
+struct SimulationContext {
+    double ts;
+    GLV glv;
+    Vector3d pos_ref;
+    Earth eth;
+    double local_g;
+    std::vector<std::string> file_list; // 数据文件列表
+    
+    // 核心基准：对准后的姿态和零偏
+    Vector3d att_align; 
+    Vector3d eb_align;
+    Vector3d db_align;
+    Matrix3d Cnb_align; // 【关键】锁定的姿态基准
+};
 
-    //     CAIParams acc_pure_p;
-    //     acc_pure_p.bias_ug = 0.0;
-    //     acc_pure_p.vrw_ug  = 0.05; 
-    //     AtomicAccSimulator atom_pure_a(pos_ref, glv, acc_pure_p);
-    //     atom_pure_a.Init(att_true);
-
-    //     // 运行测试 (注意：这里去掉了 exit(0)，让它跑完继续)
-    //     Run_Pure_Atomic_Nav(pos_ref, att_true, atom_pure_g, atom_pure_a, ts);
-    // }
-
-
-// ========== 简化加载接口 ==========
 // 只加载原始 IMU 数据，不做切片（用于 HybridAlign 自动切片）
 inline std::vector<IMUData> LoadIMUData(const std::string& filename, double ts, double target_g) {
     std::vector<IMUData> data;

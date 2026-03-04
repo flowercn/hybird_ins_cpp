@@ -43,8 +43,12 @@ target_link_libraries(psins Eigen3::Eigen)
 add_executable(test src/test.cpp  src/cai_sim.cpp src/support.h)
 target_link_libraries(test psins)
 
-# [目标 B] 主程序 (包含暴力搜索)
+# [目标 B] 主程序
 add_executable(main src/main.cpp src/cai_sim.cpp src/support.h)
+
+# [目标 c] 主程序
+add_executable(cai_sim_test src/test_fgo.cpp  src/cai_sim.cpp)
+target_link_libraries(cai_sim_test psins gtsam)
 
 # [修改] 链接 OpenMP::OpenMP_CXX 以开启多线程支持
 if(OpenMP_CXX_FOUND)
