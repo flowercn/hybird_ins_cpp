@@ -219,15 +219,8 @@ int main() {
 
     // 3. 批量运行实验 (Phase 3)
     vector<ExperimentConfig> experiments = {
-        // 第一组：仅陀螺组合 (复现舒拉震荡)
-        //{"Group_2.0s_GyroOnly", 2.0, 0.0, false, "nav_dead_2.0s_gyro_only.csv"}, 
-        //{"Group_1.6s_GyroOnly", 1.6, 0.4, false, "nav_dead_1.6s_gyro_only.csv"}, 
-        //{"Group_1.2s_GyroOnly", 1.2, 0.8, false, "nav_dead_1.2s_gyro_only.csv"},
-
-        // 第二组：陀螺+加计全组合 (压制舒拉震荡)
-        //{"Group_2.0s_GyroAcc",  2.0, 0.0, true,  "nav_dead_2.0s_gyro_acc.csv"}, 
-        {"Group_1.6s_GyroAcc",  1.6, 0.4, true,  "nav_dead_1.6s_gyro_acc.csv"}, 
-        //{"Group_1.2s_GyroAcc",  1.2, 0.8, true,  "nav_dead_1.2s_gyro_acc.csv"}
+         {"Group_1.6s_GyroOnly", AlgoType::ES_FGO, 24.0, 1.6, 0.4, false, "nav_dead_1.6s_gyro_only.csv"}, 
+         {"Group_1.6s_GyroAcc",  AlgoType::ES_FGO, 24.0, 1.6, 0.4, true,  "nav_dead_1.6s_gyro_acc.csv"}, 
     };
 
     cout << "\n>>> Starting Batch Processing (" << experiments.size() << " scenarios)..." << endl;

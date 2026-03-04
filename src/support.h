@@ -16,13 +16,21 @@ using namespace std;
 using namespace Eigen;
 using namespace cai;
 
+enum class AlgoType {
+    PURE_FOG,  // 纯光纤机械编排 (用于提取最大发散误差)
+    ES_FGO,    // 因子图解析平滑 (我们的主角，用于画锯齿图和测算 O(1) 耗时)
+    EKF        // 传统重积分滤波 (靶子，用于测算 O(N) 耗时)
+};
+
 // 实验配置参数
 struct ExperimentConfig {
-    string name;        // 实验名
-    double t_active;    // 有效时间
-    double t_dead;      // 死区时间
-    bool use_atomic_acc;// 是否使用原子加计
-    string output_file; // 输出文件名
+    string name;           // 实验名
+    AlgoType algo;         // 算法类型
+    double duration_hours; // 仿真运行时间 (小时)
+    double t_active;       // 有效时间 (s)
+    double t_dead;         // 死区时间 (s)
+    bool use_atomic_acc;   // 是否使用原子加计
+    string output_file;    // 输出文件名
 };
 
 // 共享的上下文环境 (避免重复传参)
