@@ -467,3 +467,14 @@ HybridAlignResult SinsEngine::Run_HybridAlign(const std::vector<IMUData>& data,
     
     return result;
 }
+
+void SinsEngine::UpdateInsState(const Eigen::VectorXd& dx) {
+    Vector3d phi = dx.segment<3>(0);
+    Matrix3d R_phi = (phi.norm() > 1e-12) ? AngleAxisd(phi.norm(), phi.normalized()).toRotationMatrix() : (Matrix3d::Identity() + INSMath::askew(phi));
+    
+    ins.Cnb = R_phi * ins.Cnb;
+    ins.att = INSMath::m2att(ins.Cnb);
+    ins.qnb = INSMath::a2qua(ins.att); 
+    ins.vn  += dx.segment<3>(3);
+    ins.pos += dx.segment<3>(6);
+}

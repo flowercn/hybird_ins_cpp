@@ -4,16 +4,12 @@ project(HybridINS)
 # --- 0. 基础设置 ---
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-# 如果你要调试看变量，这里改成 Debug；如果要跑暴力搜索求速度，一定要用 Release！
+# 核心实验跑数据，必须使用 Release 以获得最高执行效率
 set(CMAKE_BUILD_TYPE Release) 
 
 # --- 1. 寻找依赖库 ---
+# 既然是纯解析推导，我们只需要极其轻量的 Eigen3 进行矩阵运算
 find_package(Eigen3 REQUIRED)
-find_package(GTSAM REQUIRED)
-find_package(Boost REQUIRED)
-
-# [新增] 查找 OpenMP 支持
-find_package(OpenMP REQUIRED)
 
 # --- 2. 全局头文件路径配置 ---
 include_directories(
@@ -21,12 +17,11 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/psins
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${EIGEN3_INCLUDE_DIR}
-    ${GTSAM_INCLUDE_DIR}
 )
 
-# --- 3. 定义源文件与库 ---
+# --- 3. 定义源文件与核心库 ---
 
-# [核心库] PSINS (将底层算法封装为静态库)
+# [核心库] PSINS (惯导底层引擎)
 set(PSINS_SRC 
     psins/earth.cpp 
     psins/ins_math.cpp 
@@ -39,21 +34,6 @@ target_link_libraries(psins Eigen3::Eigen)
 
 # --- 4. 编译目标 ---
 
-# [目标 A] 主测试程序
-add_executable(test src/test.cpp  src/cai_sim.cpp src/support.h)
-target_link_libraries(test psins)
-
-# [目标 B] 主程序
-add_executable(main src/main.cpp src/cai_sim.cpp src/support.h)
-
-# [目标 c] 主程序
-add_executable(cai_sim_test src/test_fgo.cpp  src/cai_sim.cpp)
-target_link_libraries(cai_sim_test psins gtsam)
-
-# [修改] 链接 OpenMP::OpenMP_CXX 以开启多线程支持
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(main psins OpenMP::OpenMP_CXX)
-else()
-    # 如果没找到 OpenMP，就只链接 psins (单线程跑)
-    target_link_libraries(main psins)
-endif()
+# [唯一主程序] 顶刊论文核心算法对决 (test_fgo)
+add_executable(test_fgo src/test_fgo.cpp src/experiment_app.cpp src/cai_sim.cpp)
+target_link_libraries(test_fgo psins)

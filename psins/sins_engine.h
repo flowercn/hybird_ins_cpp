@@ -137,6 +137,9 @@ public:
     Eigen::Vector3d ComputeGeometricEB(const Eigen::Vector3d& att,
                                         const std::vector<IMUData>& data,
                                         double eb_sigma_allan_dph = 0.003);
+
+    // 更新INS状态
+    void UpdateInsState(const Eigen::VectorXd& dx);
 };
 
 #endif // SINS_ENGINE_H
